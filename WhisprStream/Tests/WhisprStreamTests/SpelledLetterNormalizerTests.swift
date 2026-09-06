@@ -34,6 +34,32 @@ final class SpelledLetterNormalizerTests: XCTestCase {
         )
     }
 
+    func testPreservesContractionsNextToSingleLetterWords() {
+        XCTAssertEqual(
+            SpelledLetterNormalizer.normalize("That's a very good point"),
+            "That's a very good point"
+        )
+        XCTAssertEqual(
+            SpelledLetterNormalizer.normalize("That’s a very good point"),
+            "That’s a very good point"
+        )
+        XCTAssertEqual(
+            SpelledLetterNormalizer.normalize("I'm a developer"),
+            "I'm a developer"
+        )
+        XCTAssertEqual(
+            SpelledLetterNormalizer.normalize("Why can't I continue?"),
+            "Why can't I continue?"
+        )
+    }
+
+    func testStillJoinsQuotedSpelledLetters() {
+        XCTAssertEqual(
+            SpelledLetterNormalizer.normalize("Spell 'A B' now"),
+            "Spell 'AB' now"
+        )
+    }
+
     func testPreservesWhitespaceOutsideTheJoinedRun() {
         XCTAssertEqual(
             SpelledLetterNormalizer.normalize("  O\tI\nN P  "),

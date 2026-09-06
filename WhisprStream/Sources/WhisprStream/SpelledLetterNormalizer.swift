@@ -55,11 +55,12 @@ enum SpelledLetterNormalizer {
             let start = index
             index = text.index(after: index)
 
-            // A token only represents a spelled letter when the neighboring
-            // characters are not also ASCII letters or digits.
-            guard (start == text.startIndex
-                    || !isASCIIAlphanumeric(text[text.index(before: start)])),
-                  (index == text.endIndex || !isASCIIAlphanumeric(text[index]))
+            // A token only represents a spelled letter when it is not part of
+            // a larger ASCII word, including one connected by an apostrophe.
+            // Without the apostrophe check, the `s` in "That's a" and the
+            // following `a` look like a spelled-letter run and become `sa`.
+            guard !isAttachedToASCIIWord(before: start, in: text),
+                  !isAttachedToASCIIWord(after: index, in: text)
             else { continue }
 
             tokens.append(Token(range: start..<index, letter: text[start]))
@@ -73,5 +74,33 @@ enum SpelledLetterNormalizer {
 
     private static func isASCIIAlphanumeric(_ character: Character) -> Bool {
         character.isASCII && (character.isLetter || character.isNumber)
+    }
+
+    private static func isAttachedToASCIIWord(
+        before index: String.Index,
+        in text: String
+    ) -> Bool {
+        guard index > text.startIndex else { return false }
+        let adjacent = text.index(before: index)
+        if isASCIIAlphanumeric(text[adjacent]) { return true }
+        guard isApostrophe(text[adjacent]), adjacent > text.startIndex else {
+            return false
+        }
+        return isASCIIAlphanumeric(text[text.index(before: adjacent)])
+    }
+
+    private static func isAttachedToASCIIWord(
+        after index: String.Index,
+        in text: String
+    ) -> Bool {
+        guard index < text.endIndex else { return false }
+        if isASCIIAlphanumeric(text[index]) { return true }
+        guard isApostrophe(text[index]) else { return false }
+        let next = text.index(after: index)
+        return next < text.endIndex && isASCIIAlphanumeric(text[next])
+    }
+
+    private static func isApostrophe(_ character: Character) -> Bool {
+        character == "'" || character == "’"
     }
 }
