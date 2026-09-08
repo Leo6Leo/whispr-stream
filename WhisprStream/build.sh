@@ -76,7 +76,7 @@ swift_build() {
             -Xswiftc -D -Xswiftc WHISPR_RELEASE
         )
     fi
-    swift build "$@" "${swift_defines[@]}"
+    swift build "$@" ${swift_defines[@]+"${swift_defines[@]}"}
 }
 
 if [ "$RELEASE" = "1" ]; then
@@ -147,11 +147,11 @@ if [ "$RELEASE" = "1" ]; then
     # requirement stable. WHISPR_RELEASE is needed only by the app target's
     # runtime-selection code.
     swift build -c release --product WhisprStreamUpdateSigner \
-        "${RELEASE_PATH_FLAGS[@]}"
+        ${RELEASE_PATH_FLAGS[@]+"${RELEASE_PATH_FLAGS[@]}"}
     swift build -c release --product WhisprStreamUpdateInstaller \
-        "${RELEASE_PATH_FLAGS[@]}"
+        ${RELEASE_PATH_FLAGS[@]+"${RELEASE_PATH_FLAGS[@]}"}
     swift_build -c release --product WhisprStream \
-        "${RELEASE_PATH_FLAGS[@]}"
+        ${RELEASE_PATH_FLAGS[@]+"${RELEASE_PATH_FLAGS[@]}"}
 else
     swift_build -c release
 fi
@@ -254,17 +254,17 @@ fi
 if [ "$RELEASE" = "1" ]; then
     # A stable code identity lets this release-only tool retain access to the
     # same login-Keychain signing key across rebuilds.
-    codesign --force "${CODESIGN_OPTIONS[@]}" --sign "$IDENTITY" "$UPDATE_SIGNER"
+    codesign --force ${CODESIGN_OPTIONS[@]+"${CODESIGN_OPTIONS[@]}"} --sign "$IDENTITY" "$UPDATE_SIGNER"
     codesign --verify --strict "$UPDATE_SIGNER"
     codesign --verify --strict \
         -R="identifier \"WhisprStreamUpdateSigner\" and certificate leaf = H\"$PINNED_SIGNING_CERT_SHA1\"" \
         "$UPDATE_SIGNER"
 fi
-codesign --force "${CODESIGN_OPTIONS[@]}" --sign "$IDENTITY" \
+codesign --force ${CODESIGN_OPTIONS[@]+"${CODESIGN_OPTIONS[@]}"} --sign "$IDENTITY" \
     "$APP/Contents/Helpers/WhisprStreamUpdateInstaller"
 # Nested code is signed explicitly above; signing the outer bundle without
 # --deep prevents codesign from making implicit nested-code decisions.
-codesign --force "${CODESIGN_OPTIONS[@]}" --sign "$IDENTITY" "$APP"
+codesign --force ${CODESIGN_OPTIONS[@]+"${CODESIGN_OPTIONS[@]}"} --sign "$IDENTITY" "$APP"
 if [ "$RELEASE" = "1" ]; then
     codesign --verify --strict --deep "$APP"
     codesign --verify --strict --deep \
