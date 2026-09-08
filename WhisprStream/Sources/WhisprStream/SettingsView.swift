@@ -226,6 +226,15 @@ private struct GeneralTab: View {
             }
 
             Section {
+                Toggle(isOn: $settings.pauseMediaWhileDictating) {
+                    Text("Pause music while dictating")
+                    Text("Pause playing music and resume it when you stop. Avoids the Bluetooth stereo-to-call-quality drop when the mic opens. Controls Music and Spotify.")
+                }
+            } header: {
+                Text("While dictating")
+            }
+
+            Section {
                 LabeledContent("Language") {
                     Text("Automatic")
                         .foregroundStyle(.secondary)

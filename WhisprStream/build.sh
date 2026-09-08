@@ -213,6 +213,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSUIElement</key><true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>WhisprStream transcribes your speech on-device.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>WhisprStream pauses your music while you dictate and resumes it afterward.</string>
 $DEVELOPMENT_PYTHON_PLIST
     <key>WhisprRuntimeURL</key><string>$RUNTIME_URL</string>
     <key>WhisprRuntimeSHA256</key><string>$RUNTIME_SHA256</string>
