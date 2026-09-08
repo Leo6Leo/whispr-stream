@@ -65,6 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: HUDPanel!
     private var statusItem: NSStatusItem!
     private let capture = AudioCapture()
+    private let media = MediaController(isEnabled: { Settings.shared.pauseMediaWhileDictating })
     private var hotkey: HotKeyMonitor!
     private var asr: ASRService!
     private var dismissWork: DispatchWorkItem?
@@ -350,6 +351,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the Settings window instead.
         if state.phase == .listening {
             capture.stop()
+            media.resumeAfterDictation()
             state.stopDictationTimer()
             state.level = 0
             dismissNow()
@@ -464,6 +466,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.startDictationTimer()
         panel.present()
 
+        // Pause playing music before the mic opens so Bluetooth stays in stereo.
+        media.pauseForDictation()
         settings.playStart()
         let shortLanguage = ShortUtteranceLanguageResolver.modelLanguage(
             for: settings.shortUtteranceLanguage
@@ -497,6 +501,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard state.phase != .loading else { return }
         guard state.phase == .listening else { return }
         capture.stop()
+        media.resumeAfterDictation()
         state.stopDictationTimer()
         state.level = 0
         state.phase = .thinking
@@ -580,6 +585,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
         case let .error(message):
+
+            media.resumeAfterDictation()
             cancelCursorContextResolution()
             if !isASRReady {
                 speechEngineStartupWork?.cancel()
@@ -597,6 +604,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             scheduleDismiss(after: 1.8)
 
         case let .terminated(message):
+
+            media.resumeAfterDictation()
             cancelCursorContextResolution()
             speechEngineStartupWork?.cancel()
             speechEngineStartupWork = nil
