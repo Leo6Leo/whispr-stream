@@ -3,6 +3,52 @@ import XCTest
 @testable import WhisprStream
 
 final class ASRServiceTests: XCTestCase {
+    func testWarmupCommandWaitsForSidecarAcknowledgement() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("WhisprStream-ASRServiceTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let script = directory.appendingPathComponent("warmup_sidecar.py")
+        try """
+        import json
+        import sys
+
+        print(json.dumps({"type": "ready", "ms": 1}), flush=True)
+        for line in sys.stdin:
+            if json.loads(line).get("cmd") == "warmup":
+                print(json.dumps({"type": "warmed", "ms": 37}), flush=True)
+        """.write(to: script, atomically: true, encoding: .utf8)
+
+        let service = ASRService(
+            python: URL(fileURLWithPath: "/usr/bin/python3"),
+            script: script,
+            model: "unused",
+            bits: 8,
+            context: "",
+            shortUtteranceLanguage: .english
+        )
+        let ready = expectation(description: "sidecar becomes ready")
+        let warmed = expectation(description: "warmup completes")
+        service.onEvent = { event in
+            switch event {
+            case .ready:
+                ready.fulfill()
+            case let .warmed(ms):
+                XCTAssertEqual(ms, 37)
+                warmed.fulfill()
+            default:
+                break
+            }
+        }
+        try service.start()
+        defer { service.shutdown() }
+
+        wait(for: [ready], timeout: 2)
+        service.warmUp()
+        wait(for: [warmed], timeout: 2)
+    }
+
     func testSelectedEngineIsPassedToSidecar() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("WhisprStream-ASRServiceTests-\(UUID().uuidString)")

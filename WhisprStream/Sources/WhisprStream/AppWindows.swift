@@ -11,6 +11,7 @@ final class AppWindows {
     private var onboarding: NSWindow?
     private var settings: NSWindow?
     private var about: NSWindow?
+    private var updatePrompt: NSWindow?
     private var firstDictationCoach: FirstDictationCoachPanel?
     private var firstDictationCoachDismissal: DispatchWorkItem?
 
@@ -78,13 +79,25 @@ final class AppWindows {
 
     // MARK: - Settings
 
-    func showSettings(_ appSettings: Settings, runtime: RuntimeManager) {
+    func showSettings(
+        _ appSettings: Settings,
+        runtime: RuntimeManager,
+        updates: AppUpdateManager
+    ) {
         if let settings {
             present(settings)
             return
         }
         let window = makeWindow(title: "Settings - WhisprStream", styleMask: [.titled, .closable])
-        let host = NSHostingView(rootView: SettingsView(settings: appSettings, runtime: runtime))
+        let host = NSHostingView(rootView: SettingsView(
+            settings: appSettings,
+            runtime: runtime,
+            updates: updates,
+            onShowUpdate: { [weak self, weak updates] in
+                guard let updates else { return }
+                self?.showUpdatePrompt(updates: updates)
+            }
+        ))
         window.contentView = host
         // Let the tabbed form declare its own size rather than forcing one —
         // a hard-coded height is what clipped the last section before.
@@ -95,7 +108,7 @@ final class AppWindows {
 
     // MARK: - About
 
-    func showAbout() {
+    func showAbout(updates: AppUpdateManager) {
         if let about {
             present(about)
             return
@@ -107,9 +120,39 @@ final class AppWindows {
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
-        window.contentView = NSHostingView(rootView: AboutView())
-        window.setContentSize(NSSize(width: 380, height: 350))
+        window.contentView = NSHostingView(rootView: AboutView(
+            updates: updates,
+            onShowUpdate: { [weak self, weak updates] in
+                guard let updates else { return }
+                self?.showUpdatePrompt(updates: updates)
+            }
+        ))
+        window.setContentSize(NSSize(width: 420, height: 430))
         about = window
+        present(window)
+    }
+
+    // MARK: - App updates
+
+    func showUpdatePrompt(updates: AppUpdateManager) {
+        if let updatePrompt {
+            present(updatePrompt)
+            return
+        }
+
+        let window = makeWindow(
+            title: "WhisprStream Update",
+            styleMask: [.titled, .closable, .fullSizeContentView]
+        )
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.isMovableByWindowBackground = true
+        window.contentView = NSHostingView(rootView: AppUpdatePromptView(
+            updates: updates,
+            onDismiss: { [weak window] in window?.close() }
+        ))
+        window.setContentSize(NSSize(width: 470, height: 390))
+        updatePrompt = window
         present(window)
     }
 

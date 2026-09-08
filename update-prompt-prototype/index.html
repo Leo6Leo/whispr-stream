@@ -1,0 +1,870 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WhisprStream update prompt prototype</title>
+  <meta name="description" content="Interactive prototype for a friendly WhisprStream update prompt and persistent update indicator.">
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #191b22;
+      --muted: #686d78;
+      --faint: #9398a3;
+      --line: rgba(34, 40, 54, 0.12);
+      --blue: #3578f6;
+      --blue-strong: #2568e8;
+      --blue-soft: #eaf2ff;
+      --green: #25a66f;
+      --window: rgba(248, 249, 251, 0.9);
+      --sidebar: rgba(234, 237, 242, 0.84);
+      --shadow: 0 30px 90px rgba(28, 35, 52, 0.28), 0 5px 18px rgba(24, 28, 38, 0.12);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", Inter, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body { min-height: 100%; }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 18% 25%, rgba(147, 199, 255, 0.9), transparent 30%),
+        radial-gradient(circle at 82% 20%, rgba(190, 162, 255, 0.65), transparent 31%),
+        radial-gradient(circle at 54% 88%, rgba(105, 220, 193, 0.58), transparent 35%),
+        linear-gradient(145deg, #ddecff 0%, #d9d7fa 48%, #c8f0e8 100%);
+      overflow: hidden;
+    }
+
+    button, a { font: inherit; }
+    button { color: inherit; }
+
+    .desktop {
+      position: relative;
+      min-height: 100vh;
+      padding: 64px 28px 36px;
+      isolation: isolate;
+    }
+
+    .desktop::before,
+    .desktop::after {
+      content: "";
+      position: absolute;
+      z-index: -1;
+      border-radius: 999px;
+      filter: blur(2px);
+      opacity: 0.72;
+    }
+
+    .desktop::before {
+      width: 34vw;
+      height: 34vw;
+      top: 10vh;
+      left: 7vw;
+      background: linear-gradient(150deg, rgba(255,255,255,.74), rgba(120,168,255,.12));
+      transform: rotate(-24deg);
+    }
+
+    .desktop::after {
+      width: 30vw;
+      height: 42vw;
+      right: 7vw;
+      bottom: -14vw;
+      background: linear-gradient(155deg, rgba(255,255,255,.64), rgba(72,194,164,.1));
+      transform: rotate(28deg);
+    }
+
+    .menu-bar {
+      position: fixed;
+      z-index: 30;
+      inset: 0 0 auto 0;
+      height: 38px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 18px;
+      background: rgba(250, 251, 253, 0.7);
+      border-bottom: 1px solid rgba(255,255,255,.7);
+      box-shadow: 0 1px 12px rgba(24,30,42,.08);
+      backdrop-filter: blur(24px) saturate(1.35);
+      -webkit-backdrop-filter: blur(24px) saturate(1.35);
+      font-size: 13px;
+      font-weight: 550;
+    }
+
+    .menu-left,
+    .menu-right,
+    .update-menubar {
+      display: flex;
+      align-items: center;
+    }
+
+    .menu-left { gap: 19px; }
+    .menu-right { gap: 12px; }
+    .apple { font-size: 17px; line-height: 1; transform: translateY(-1px); }
+    .app-name { font-weight: 720; }
+    .menu-copy { color: rgba(25,27,34,.82); }
+    .time { min-width: 64px; text-align: right; }
+
+    .update-menubar {
+      min-height: 26px;
+      gap: 7px;
+      padding: 0 10px 0 8px;
+      border: 0;
+      border-radius: 7px;
+      background: rgba(255,255,255,.72);
+      box-shadow: inset 0 0 0 1px rgba(29,35,48,.09), 0 1px 2px rgba(29,35,48,.06);
+      cursor: pointer;
+      transition: background .16s ease, transform .16s ease;
+    }
+
+    .update-menubar:hover { background: #fff; }
+    .update-menubar:active { transform: scale(.98); }
+    .update-menubar.up-to-date .update-dot {
+      background: var(--green);
+      box-shadow: 0 0 0 3px rgba(37,166,111,.12);
+    }
+
+    .update-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--blue);
+      box-shadow: 0 0 0 3px rgba(53,120,246,.12);
+    }
+
+    .sound-icon,
+    .control-icon {
+      width: 18px;
+      height: 18px;
+      display: grid;
+      place-items: center;
+      color: rgba(21,24,31,.78);
+    }
+
+    .settings-window {
+      width: min(850px, calc(100vw - 56px));
+      height: min(570px, calc(100vh - 100px));
+      min-height: 460px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 190px 1fr;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,.82);
+      border-radius: 14px;
+      background: var(--window);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(32px) saturate(1.2);
+      -webkit-backdrop-filter: blur(32px) saturate(1.2);
+    }
+
+    .settings-sidebar {
+      position: relative;
+      padding: 52px 12px 16px;
+      background: var(--sidebar);
+      border-right: 1px solid rgba(42,47,58,.11);
+    }
+
+    .traffic-lights {
+      position: absolute;
+      top: 16px;
+      left: 17px;
+      display: flex;
+      gap: 8px;
+    }
+
+    .traffic-lights i {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      display: block;
+      box-shadow: inset 0 0 0 .5px rgba(0,0,0,.14);
+    }
+
+    .traffic-lights i:nth-child(1) { background: #ff5f57; }
+    .traffic-lights i:nth-child(2) { background: #febc2e; }
+    .traffic-lights i:nth-child(3) { background: #28c840; }
+
+    .sidebar-title {
+      margin: 0 10px 10px;
+      color: #737985;
+      font-size: 12px;
+      font-weight: 650;
+      letter-spacing: .02em;
+    }
+
+    .nav-item {
+      width: 100%;
+      min-height: 34px;
+      display: grid;
+      grid-template-columns: 26px 1fr auto;
+      align-items: center;
+      gap: 7px;
+      padding: 0 9px;
+      border: 0;
+      border-radius: 7px;
+      background: transparent;
+      text-align: left;
+      font-size: 14px;
+    }
+
+    .nav-item.selected {
+      background: rgba(110,117,130,.15);
+      box-shadow: inset 0 0 0 1px rgba(71,77,89,.04);
+    }
+
+    .nav-icon {
+      width: 22px;
+      height: 22px;
+      display: grid;
+      place-items: center;
+      border-radius: 6px;
+      color: white;
+      background: linear-gradient(#6e7787, #4f5868);
+      font-size: 12px;
+      font-weight: 700;
+      box-shadow: 0 1px 2px rgba(0,0,0,.15);
+    }
+
+    .nav-item:nth-of-type(2) .nav-icon { background: linear-gradient(#8e84f7, #6255d8); }
+    .nav-item:nth-of-type(3) .nav-icon { background: linear-gradient(#ffae43, #ea7b12); }
+    .nav-item:nth-of-type(4) .nav-icon { background: linear-gradient(#51bf9b, #268f71); }
+    .nav-item:nth-of-type(5) .nav-icon { background: linear-gradient(#5d94f7, #2e67ce); }
+    .nav-item:nth-of-type(6) .nav-icon { background: linear-gradient(#9aa0ac, #676e7b); }
+    .nav-item:nth-of-type(7) .nav-icon { background: linear-gradient(#5b99f8, #2f6ddd); }
+
+    .count-badge {
+      min-width: 18px;
+      height: 18px;
+      display: grid;
+      place-items: center;
+      border-radius: 9px;
+      color: #fff;
+      background: var(--blue);
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .settings-content {
+      position: relative;
+      padding: 58px 66px 42px;
+      background: rgba(255,255,255,.64);
+    }
+
+    .content-kicker {
+      margin: 0 0 8px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(28px, 3vw, 38px);
+      line-height: 1.12;
+      letter-spacing: -.035em;
+    }
+
+    .content-intro {
+      max-width: 520px;
+      margin: 12px 0 30px;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.52;
+    }
+
+    .setting-card {
+      padding: 0 18px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(255,255,255,.76);
+      box-shadow: 0 1px 2px rgba(26,31,42,.04);
+    }
+
+    .setting-row {
+      min-height: 58px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      border-bottom: 1px solid var(--line);
+      font-size: 14px;
+    }
+
+    .setting-row:last-child { border-bottom: 0; }
+    .setting-value { color: var(--muted); }
+
+    .switch {
+      width: 36px;
+      height: 22px;
+      padding: 2px;
+      border-radius: 12px;
+      background: #58c86c;
+    }
+
+    .switch::after {
+      content: "";
+      width: 18px;
+      height: 18px;
+      display: block;
+      margin-left: auto;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 1px 3px rgba(0,0,0,.22);
+    }
+
+    .update-strip {
+      margin-top: 22px;
+      display: flex;
+      align-items: center;
+      gap: 13px;
+      padding: 13px 14px;
+      border: 1px solid rgba(53,120,246,.19);
+      border-radius: 12px;
+      background: linear-gradient(110deg, rgba(234,242,255,.92), rgba(245,249,255,.9));
+      color: #254f9f;
+      font-size: 14px;
+    }
+
+    .strip-icon {
+      width: 28px;
+      height: 28px;
+      flex: 0 0 auto;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      color: #fff;
+      background: var(--blue);
+      font-size: 16px;
+      font-weight: 750;
+      box-shadow: 0 4px 10px rgba(53,120,246,.2);
+    }
+
+    .update-strip strong { display: block; color: #183f8b; }
+    .update-strip span { color: #5573a9; font-size: 13px; }
+
+    .strip-button {
+      margin-left: auto;
+      padding: 6px 11px;
+      border: 0;
+      border-radius: 7px;
+      color: #fff;
+      background: var(--blue);
+      font-size: 13px;
+      font-weight: 650;
+      cursor: pointer;
+    }
+
+    .scrim {
+      position: fixed;
+      z-index: 20;
+      inset: 38px 0 0;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: rgba(25, 29, 40, 0.26);
+      backdrop-filter: blur(3px);
+      -webkit-backdrop-filter: blur(3px);
+      opacity: 1;
+      visibility: visible;
+      transition: opacity .22s ease, visibility .22s ease;
+    }
+
+    .scrim.hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+
+    .update-dialog {
+      width: min(470px, calc(100vw - 36px));
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,.9);
+      border-radius: 18px;
+      background: rgba(253,253,254,.95);
+      box-shadow: 0 35px 100px rgba(14,19,31,.35), 0 6px 24px rgba(14,19,31,.2);
+      backdrop-filter: blur(34px) saturate(1.25);
+      -webkit-backdrop-filter: blur(34px) saturate(1.25);
+      transform: translateY(0) scale(1);
+      transition: transform .24s cubic-bezier(.2,.85,.3,1);
+    }
+
+    .scrim.hidden .update-dialog { transform: translateY(8px) scale(.975); }
+
+    .dialog-body { padding: 30px 30px 23px; }
+
+    .product-lockup {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 23px;
+    }
+
+    .app-icon {
+      width: 54px;
+      height: 54px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 3px;
+      border-radius: 13px;
+      background:
+        radial-gradient(circle at 30% 15%, rgba(255,255,255,.22), transparent 36%),
+        linear-gradient(145deg, #272c38, #0d1016);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.12), 0 6px 15px rgba(20,25,35,.22);
+    }
+
+    .app-icon i {
+      width: 3px;
+      border-radius: 4px;
+      background: linear-gradient(#77eed7, #56cbb8);
+      box-shadow: 0 0 8px rgba(103,228,205,.4);
+    }
+
+    .app-icon i:nth-child(1), .app-icon i:nth-child(5) { height: 12px; }
+    .app-icon i:nth-child(2), .app-icon i:nth-child(4) { height: 22px; }
+    .app-icon i:nth-child(3) { height: 32px; }
+
+    .product-name { font-size: 14px; font-weight: 710; }
+    .version-line { margin-top: 3px; color: var(--muted); font-size: 13px; }
+
+    .dialog-heading {
+      margin: 0;
+      max-width: 380px;
+      font-size: 27px;
+      line-height: 1.16;
+      letter-spacing: -.028em;
+    }
+
+    .dialog-copy {
+      margin: 11px 0 0;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.5;
+    }
+
+    .keep-safe {
+      margin: 20px 0 0;
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      padding: 12px 13px;
+      border: 1px solid rgba(37,166,111,.14);
+      border-radius: 10px;
+      background: rgba(235,249,242,.8);
+      color: #28684f;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .checkmark {
+      width: 19px;
+      height: 19px;
+      flex: 0 0 auto;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      color: #fff;
+      background: var(--green);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .release-link {
+      display: inline-block;
+      margin-top: 17px;
+      border: 0;
+      padding: 0;
+      color: var(--blue-strong);
+      background: transparent;
+      font-size: 13px;
+      text-decoration: none;
+      cursor: pointer;
+    }
+
+    .release-link:hover { text-decoration: underline; }
+
+    .release-notes {
+      display: grid;
+      grid-template-rows: 0fr;
+      transition: grid-template-rows .2s ease;
+    }
+
+    .release-notes.open { grid-template-rows: 1fr; }
+    .release-notes > div { overflow: hidden; }
+
+    .release-notes ul {
+      margin: 12px 0 0;
+      padding: 12px 12px 2px 30px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.65;
+    }
+
+    .dialog-footer {
+      min-height: 72px;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 10px;
+      padding: 14px 20px;
+      border-top: 1px solid var(--line);
+      background: rgba(243,244,247,.85);
+    }
+
+    .button {
+      min-height: 34px;
+      padding: 0 16px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 640;
+      cursor: pointer;
+      transition: transform .14s ease, box-shadow .14s ease, background .14s ease;
+    }
+
+    .button:active { transform: scale(.98); }
+
+    .button.secondary {
+      border: 1px solid rgba(37,42,53,.15);
+      background: rgba(255,255,255,.86);
+      box-shadow: 0 1px 1px rgba(20,25,34,.04);
+    }
+
+    .button.secondary:hover { background: #fff; }
+
+    .button.primary {
+      min-width: 150px;
+      border: 1px solid rgba(19,79,193,.55);
+      color: #fff;
+      background: linear-gradient(#4387fa, #2c70ed);
+      box-shadow: inset 0 1px rgba(255,255,255,.22), 0 2px 5px rgba(45,106,224,.24);
+    }
+
+    .button.primary:hover { background: linear-gradient(#4b8efd, #3377ef); }
+
+    .progress-track {
+      display: none;
+      height: 5px;
+      margin-top: 20px;
+      overflow: hidden;
+      border-radius: 99px;
+      background: #e4e7ed;
+    }
+
+    .progress-fill {
+      width: 0;
+      height: 100%;
+      border-radius: inherit;
+      background: var(--blue);
+    }
+
+    .installing .progress-track { display: block; }
+    .installing .progress-fill { animation: install 2.1s cubic-bezier(.2,.75,.25,1) forwards; }
+
+    @keyframes install { to { width: 100%; } }
+
+    .demo-reset {
+      position: fixed;
+      z-index: 40;
+      right: 16px;
+      bottom: 16px;
+      min-height: 32px;
+      padding: 0 12px;
+      border: 1px solid rgba(255,255,255,.58);
+      border-radius: 9px;
+      color: rgba(29,34,45,.82);
+      background: rgba(255,255,255,.62);
+      box-shadow: 0 4px 18px rgba(23,29,40,.1);
+      backdrop-filter: blur(16px);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .demo-reset:hover { background: rgba(255,255,255,.86); }
+
+    .toast {
+      position: fixed;
+      z-index: 35;
+      left: 50%;
+      bottom: 24px;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 10px 14px;
+      border: 1px solid rgba(255,255,255,.82);
+      border-radius: 10px;
+      color: #fff;
+      background: rgba(34,39,50,.88);
+      box-shadow: 0 10px 30px rgba(17,20,29,.22);
+      backdrop-filter: blur(18px);
+      font-size: 13px;
+      transform: translate(-50%, 18px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .2s ease, transform .2s ease;
+    }
+
+    .toast.visible { opacity: 1; transform: translate(-50%, 0); }
+
+    @media (max-width: 720px) {
+      body { overflow: auto; }
+      .menu-copy, .sound-icon { display: none; }
+      .desktop { padding: 54px 12px 24px; }
+      .settings-window {
+        width: 100%;
+        height: calc(100vh - 76px);
+        min-height: 550px;
+        grid-template-columns: 64px 1fr;
+      }
+      .settings-sidebar { padding-inline: 8px; }
+      .sidebar-title, .nav-label { display: none; }
+      .nav-item { display: flex; justify-content: center; padding: 0; }
+      .count-badge { position: absolute; margin: -20px 0 0 19px; }
+      .settings-content { padding: 48px 22px 32px; }
+      .content-intro { font-size: 15px; }
+      .update-strip { align-items: flex-start; flex-wrap: wrap; }
+      .strip-button { width: 100%; margin: 3px 0 0; }
+      .scrim { padding: 14px; align-items: center; }
+      .dialog-body { padding: 24px 22px 20px; }
+      .dialog-heading { font-size: 24px; }
+      .dialog-footer { padding: 12px; }
+      .button { flex: 1; }
+      .button.primary { min-width: 0; }
+      .demo-reset { display: none; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <header class="menu-bar" aria-label="macOS menu bar">
+    <div class="menu-left">
+      <span class="apple" aria-hidden="true">●</span>
+      <span class="app-name">WhisprStream</span>
+      <span class="menu-copy">File</span>
+      <span class="menu-copy">Edit</span>
+      <span class="menu-copy">Window</span>
+      <span class="menu-copy">Help</span>
+    </div>
+    <div class="menu-right">
+      <button class="update-menubar" id="menuUpdate" type="button" aria-label="Version 1.1.0 update available">
+        <span class="update-dot" aria-hidden="true"></span>
+        <span id="menuUpdateLabel">Update available</span>
+      </button>
+      <span class="sound-icon" aria-hidden="true">◖))</span>
+      <span class="control-icon" aria-hidden="true">⌁</span>
+      <span class="time" id="clock">9:41 AM</span>
+    </div>
+  </header>
+
+  <main class="desktop">
+    <section class="settings-window" aria-label="WhisprStream Settings">
+      <aside class="settings-sidebar">
+        <div class="traffic-lights" aria-hidden="true"><i></i><i></i><i></i></div>
+        <p class="sidebar-title">Settings</p>
+        <button class="nav-item selected" type="button"><span class="nav-icon">G</span><span class="nav-label">General</span></button>
+        <button class="nav-item" type="button"><span class="nav-icon">M</span><span class="nav-label">Model</span></button>
+        <button class="nav-item" type="button"><span class="nav-icon">S</span><span class="nav-label">Sound</span></button>
+        <button class="nav-item" type="button"><span class="nav-icon">⌘</span><span class="nav-label">Shortcuts</span></button>
+        <button class="nav-item" type="button"><span class="nav-icon">P</span><span class="nav-label">Permissions</span></button>
+        <button class="nav-item" type="button"><span class="nav-icon">E</span><span class="nav-label">Engine</span></button>
+        <button class="nav-item" type="button" id="aboutNav"><span class="nav-icon">i</span><span class="nav-label">About</span><span class="count-badge" id="countBadge" aria-label="One update">1</span></button>
+      </aside>
+
+      <div class="settings-content">
+        <p class="content-kicker">GENERAL</p>
+        <h1>Make dictation feel natural.</h1>
+        <p class="content-intro">Choose how WhisprStream listens and behaves across your Mac.</p>
+        <div class="setting-card">
+          <div class="setting-row"><span>Recording shortcut</span><span class="setting-value">Right Option</span></div>
+          <div class="setting-row"><span>Start at login</span><span class="switch" aria-label="Start at login enabled"></span></div>
+          <div class="setting-row"><span>Recording mode</span><span class="setting-value">Hold to speak</span></div>
+        </div>
+
+        <div class="update-strip" id="updateStrip">
+          <div class="strip-icon" id="stripIcon" aria-hidden="true">↑</div>
+          <div>
+            <strong id="stripTitle">WhisprStream 1.1.0 is available</strong>
+            <span id="stripCopy">Your models and settings will stay in place.</span>
+          </div>
+          <button class="strip-button" id="stripUpdate" type="button">Review update</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="scrim" id="scrim">
+    <section class="update-dialog" id="dialog" role="dialog" aria-modal="true" aria-labelledby="dialogTitle" aria-describedby="dialogCopy">
+      <div class="dialog-body">
+        <div class="product-lockup">
+          <div class="app-icon" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+          <div>
+            <div class="product-name">WhisprStream</div>
+            <div class="version-line">Version 1.1.0 · Recommended update</div>
+          </div>
+        </div>
+
+        <h2 class="dialog-heading" id="dialogTitle">Keep WhisprStream at its best.</h2>
+        <p class="dialog-copy" id="dialogCopy">A new version is ready with the latest reliability and performance improvements.</p>
+
+        <div class="keep-safe">
+          <span class="checkmark" aria-hidden="true">✓</span>
+          <span>Your speech engine, models, vocabulary, and shortcuts stay exactly where they are.</span>
+        </div>
+
+        <button class="release-link" id="releaseToggle" type="button" aria-expanded="false">What’s included ↓</button>
+        <div class="release-notes" id="releaseNotes">
+          <div>
+            <ul>
+              <li>Everyday reliability improvements</li>
+              <li>Performance refinements</li>
+              <li>Latest fixes from the WhisprStream project</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="progress-track" aria-hidden="true"><div class="progress-fill"></div></div>
+      </div>
+      <footer class="dialog-footer">
+        <button class="button secondary" id="laterButton" type="button">Not Now</button>
+        <button class="button primary" id="updateButton" type="button">Update &amp; Relaunch</button>
+      </footer>
+    </section>
+  </div>
+
+  <button class="demo-reset" id="resetDemo" type="button">Restart prototype</button>
+  <div class="toast" id="toast" role="status"><span class="update-dot" aria-hidden="true"></span><span>The update stays available from the menu bar.</span></div>
+
+  <script>
+    const scrim = document.querySelector('#scrim');
+    const dialog = document.querySelector('#dialog');
+    const laterButton = document.querySelector('#laterButton');
+    const updateButton = document.querySelector('#updateButton');
+    const releaseToggle = document.querySelector('#releaseToggle');
+    const releaseNotes = document.querySelector('#releaseNotes');
+    const toast = document.querySelector('#toast');
+    const title = document.querySelector('#dialogTitle');
+    const copy = document.querySelector('#dialogCopy');
+    const resetDemo = document.querySelector('#resetDemo');
+    const menuUpdate = document.querySelector('#menuUpdate');
+    const menuUpdateLabel = document.querySelector('#menuUpdateLabel');
+    const countBadge = document.querySelector('#countBadge');
+    const stripIcon = document.querySelector('#stripIcon');
+    const stripTitle = document.querySelector('#stripTitle');
+    const stripCopy = document.querySelector('#stripCopy');
+    const stripUpdate = document.querySelector('#stripUpdate');
+    let toastTimer;
+    let isComplete = false;
+    let isInstalling = false;
+
+    function openPrompt() {
+      scrim.classList.remove('hidden');
+      window.setTimeout(() => updateButton.focus(), 180);
+    }
+
+    function closePrompt(showReminder = false) {
+      if (isInstalling) return;
+      scrim.classList.add('hidden');
+      if (showReminder) {
+        window.clearTimeout(toastTimer);
+        toast.classList.add('visible');
+        toastTimer = window.setTimeout(() => toast.classList.remove('visible'), 2800);
+      }
+    }
+
+    function resetPrompt() {
+      isComplete = false;
+      isInstalling = false;
+      dialog.classList.remove('installing');
+      title.textContent = 'Keep WhisprStream at its best.';
+      copy.textContent = 'A new version is ready with the latest reliability and performance improvements.';
+      laterButton.disabled = false;
+      laterButton.textContent = 'Not Now';
+      laterButton.style.display = '';
+      updateButton.disabled = false;
+      updateButton.textContent = 'Update & Relaunch';
+      releaseToggle.hidden = false;
+      releaseNotes.classList.remove('open');
+      releaseToggle.setAttribute('aria-expanded', 'false');
+      releaseToggle.textContent = 'What’s included ↓';
+      menuUpdate.classList.remove('up-to-date');
+      menuUpdate.setAttribute('aria-label', 'Version 1.1.0 update available');
+      menuUpdateLabel.textContent = 'Update available';
+      countBadge.hidden = false;
+      stripIcon.textContent = '↑';
+      stripTitle.textContent = 'WhisprStream 1.1.0 is available';
+      stripCopy.textContent = 'Your models and settings will stay in place.';
+      stripUpdate.hidden = false;
+      openPrompt();
+    }
+
+    laterButton.addEventListener('click', () => closePrompt(true));
+    menuUpdate.addEventListener('click', openPrompt);
+    stripUpdate.addEventListener('click', openPrompt);
+    document.querySelector('#aboutNav').addEventListener('click', openPrompt);
+    resetDemo.addEventListener('click', resetPrompt);
+
+    releaseToggle.addEventListener('click', () => {
+      const isOpen = releaseNotes.classList.toggle('open');
+      releaseToggle.setAttribute('aria-expanded', String(isOpen));
+      releaseToggle.textContent = isOpen ? 'Hide details ↑' : 'What’s included ↓';
+    });
+
+    updateButton.addEventListener('click', () => {
+      if (isComplete) {
+        closePrompt(false);
+        return;
+      }
+
+      isInstalling = true;
+      dialog.classList.add('installing');
+      title.textContent = 'Installing version 1.1.0…';
+      copy.textContent = 'WhisprStream will relaunch when the update is ready.';
+      updateButton.disabled = true;
+      updateButton.textContent = 'Installing…';
+      laterButton.disabled = true;
+      releaseToggle.hidden = true;
+      releaseNotes.classList.remove('open');
+
+      window.setTimeout(() => {
+        isInstalling = false;
+        isComplete = true;
+        title.textContent = 'You’re up to date.';
+        copy.textContent = 'WhisprStream 1.1.0 is ready for your next dictation.';
+        updateButton.textContent = 'Done';
+        updateButton.disabled = false;
+        laterButton.style.display = 'none';
+        menuUpdate.classList.add('up-to-date');
+        menuUpdate.setAttribute('aria-label', 'WhisprStream is up to date');
+        menuUpdateLabel.textContent = 'Up to date';
+        countBadge.hidden = true;
+        stripIcon.textContent = '✓';
+        stripTitle.textContent = 'WhisprStream is up to date';
+        stripCopy.textContent = 'Version 1.1.0 installed.';
+        stripUpdate.hidden = true;
+      }, 2200);
+    });
+
+    scrim.addEventListener('click', event => {
+      if (event.target === scrim) closePrompt(true);
+    });
+
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && !scrim.classList.contains('hidden')) closePrompt(true);
+    });
+
+    const clock = document.querySelector('#clock');
+    function updateClock() {
+      clock.textContent = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(new Date());
+    }
+    updateClock();
+    window.setInterval(updateClock, 30000);
+  </script>
+</body>
+</html>

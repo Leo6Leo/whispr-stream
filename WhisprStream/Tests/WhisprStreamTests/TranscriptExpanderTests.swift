@@ -120,6 +120,8 @@ final class TranscriptExpanderTests: XCTestCase {
         XCTAssertEqual(SpokenNumberNormalizer.normalize("the code is zero one"), "the code is 01")
         XCTAssertEqual(SpokenNumberNormalizer.normalize("twenty-four"), "24")
         XCTAssertEqual(SpokenNumberNormalizer.normalize("temperature is twenty point five degrees"), "temperature is 20.5 degrees")
+        XCTAssertEqual(SpokenNumberNormalizer.normalize("version one point two point three"), "version 1.2.3")
+        XCTAssertEqual(SpokenNumberNormalizer.normalize("one point two point three point four"), "1.2.3.4")
     }
 
     func testIsolatedSmallNumberWordsStayNaturalInEnglishProse() {
@@ -156,6 +158,7 @@ final class TranscriptExpanderTests: XCTestCase {
         )
         XCTAssertEqual(SpokenNumberNormalizer.normalize("one and two"), "one and two")
         XCTAssertEqual(SpokenNumberNormalizer.normalize("one hundred."), "100.")
+        XCTAssertEqual(SpokenNumberNormalizer.normalize("one point two point"), "one point two point")
     }
 
     func testSpokenSlashBecomesPathPunctuation() {

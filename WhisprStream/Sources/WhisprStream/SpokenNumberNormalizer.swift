@@ -308,7 +308,9 @@ enum SpokenNumberNormalizer {
             if case .point = words[$0] { return true }
             return false
         }
-        guard pointIndices.count <= 1 else { return nil }
+        if pointIndices.count > 1 {
+            return parseDottedDigitSequence(words, negative: negative)
+        }
 
         let integerWords: ArraySlice<Word>
         let fractionWords: ArraySlice<Word>
@@ -331,6 +333,31 @@ enum SpokenNumberNormalizer {
             }.joined()
         }
         return output
+    }
+
+    /// Multiple spoken points usually describe a dotted identifier such as a
+    /// software version: "one point two point three" -> "1.2.3". Keep this
+    /// deliberately narrower than ordinary number parsing so prose containing
+    /// repeated uses of "point" cannot be folded into an invented number.
+    private static func parseDottedDigitSequence(_ words: [Word], negative: Bool) -> String? {
+        var components: [String] = []
+        var digits = ""
+
+        for word in words {
+            if case .point = word {
+                guard !digits.isEmpty else { return nil }
+                components.append(digits)
+                digits = ""
+                continue
+            }
+
+            guard case let .digit(value) = word else { return nil }
+            digits += String(value)
+        }
+
+        guard !digits.isEmpty else { return nil }
+        components.append(digits)
+        return (negative ? "-" : "") + components.joined(separator: ".")
     }
 
     private static func parseInteger(_ words: [Word]) -> String? {

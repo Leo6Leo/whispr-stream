@@ -173,6 +173,20 @@ cp Resources/asr_server.py "$APP/Contents/Resources/"
 cp Resources/model_download.py "$APP/Contents/Resources/"
 cp "$PROJECT_ROOT/asr_engine.py" "$APP/Contents/Resources/"
 
+BRAND_LOGO="$PROJECT_ROOT/assets/whisprstream-logo.png"
+if [ ! -f "$BRAND_LOGO" ]; then
+    echo "error: missing original WhisprStream logo at $BRAND_LOGO" >&2
+    exit 1
+fi
+cp "$BRAND_LOGO" "$APP/Contents/Resources/whisprstream-logo.png"
+
+APP_ICON="$PROJECT_ROOT/assets/WhisprStream.icns"
+if [ ! -f "$APP_ICON" ]; then
+    echo "error: missing WhisprStream app icon at $APP_ICON" >&2
+    exit 1
+fi
+cp "$APP_ICON" "$APP/Contents/Resources/WhisprStream.icns"
+
 if [ "$RELEASE" = "1" ]; then
     # The linker records absolute object-file paths as N_OSO debug symbols;
     # remove those records after source paths have been remapped above.
@@ -209,6 +223,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleExecutable</key><string>WhisprStream</string>
+    <key>CFBundleIconFile</key><string>WhisprStream.icns</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
     <key>NSMicrophoneUsageDescription</key>
@@ -251,20 +266,31 @@ else
     fi
 fi
 
+# macOS still ships Bash 3.2, where expanding an empty array under `set -u`
+# raises "unbound variable". Local signing has no extra options, so route the
+# call explicitly instead of expanding that empty array.
+codesign_force() {
+    if [ "${#CODESIGN_OPTIONS[@]}" -gt 0 ]; then
+        codesign --force "${CODESIGN_OPTIONS[@]}" "$@"
+    else
+        codesign --force "$@"
+    fi
+}
+
 if [ "$RELEASE" = "1" ]; then
     # A stable code identity lets this release-only tool retain access to the
     # same login-Keychain signing key across rebuilds.
-    codesign --force "${CODESIGN_OPTIONS[@]}" --sign "$IDENTITY" "$UPDATE_SIGNER"
+    codesign_force --sign "$IDENTITY" "$UPDATE_SIGNER"
     codesign --verify --strict "$UPDATE_SIGNER"
     codesign --verify --strict \
         -R="identifier \"WhisprStreamUpdateSigner\" and certificate leaf = H\"$PINNED_SIGNING_CERT_SHA1\"" \
         "$UPDATE_SIGNER"
 fi
-codesign --force "${CODESIGN_OPTIONS[@]}" --sign "$IDENTITY" \
+codesign_force --sign "$IDENTITY" \
     "$APP/Contents/Helpers/WhisprStreamUpdateInstaller"
 # Nested code is signed explicitly above; signing the outer bundle without
 # --deep prevents codesign from making implicit nested-code decisions.
-codesign --force "${CODESIGN_OPTIONS[@]}" --sign "$IDENTITY" "$APP"
+codesign_force --sign "$IDENTITY" "$APP"
 if [ "$RELEASE" = "1" ]; then
     codesign --verify --strict --deep "$APP"
     codesign --verify --strict --deep \

@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import Combine
 import SwiftUI
 
 struct DeferredTranscriptDelivery: Equatable {
@@ -32,6 +33,31 @@ struct TranscriptDeliveryGate {
     }
 }
 
+/// A resident model can remain logically loaded while macOS pages its memory
+/// out. Treat readiness as a lease so the first dictation after a long idle
+/// pays any restoration cost in the explicit warm-up UI, not after recording.
+struct SpeechEngineWarmupGate {
+    static let idleInterval: TimeInterval = 5 * 60
+
+    private(set) var lastActivityAt: Date?
+
+    mutating func markActivity(at date: Date = Date()) {
+        lastActivityAt = date
+    }
+
+    mutating func reset() {
+        lastActivityAt = nil
+    }
+
+    func requiresWarmup(
+        at date: Date = Date(),
+        idleInterval: TimeInterval = Self.idleInterval
+    ) -> Bool {
+        guard let lastActivityAt else { return false }
+        return date.timeIntervalSince(lastActivityAt) >= idleInterval
+    }
+}
+
 @main
 enum Main {
     static func main() {
@@ -53,6 +79,22 @@ enum Main {
     }
 }
 
+private final class StatusUpdateDotView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        NSColor.white.withAlphaComponent(0.95).setFill()
+        NSBezierPath(ovalIn: bounds).fill()
+
+        NSColor.controlAccentColor.setFill()
+        NSBezierPath(ovalIn: bounds.insetBy(dx: 1, dy: 1)).fill()
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let speechEngineStartupTimeout: TimeInterval = 20
@@ -61,14 +103,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var settings = Settings.shared
     private let windows = AppWindows()
     private let runtime = RuntimeManager.shared
+    private let updates = AppUpdateManager()
+    private let updatePromptPolicy = AppUpdatePromptPolicy()
 
     private var panel: HUDPanel!
     private var statusItem: NSStatusItem!
+    private var statusUpdateDot: StatusUpdateDotView?
+    private var updateStatusObservation: AnyCancellable?
+    private var periodicUpdateTimer: Timer?
+    private var initialUpdateCheckWork: DispatchWorkItem?
     private let capture = AudioCapture()
     private var hotkey: HotKeyMonitor!
     private var asr: ASRService!
     private var dismissWork: DispatchWorkItem?
     private var isASRReady = false
+    private var isRewarmingSpeechEngine = false
+    private var speechEngineWarmupGate = SpeechEngineWarmupGate()
     private var speechEngineGeneration = 0
     private var speechEngineStartedAt: TimeInterval?
     private var speechEngineStartupWork: DispatchWorkItem?
@@ -93,6 +143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.endDictation()
         }
         setUpStatusItem()
+        setUpUpdateMonitoring()
 
         let trusted = AXIsProcessTrusted()
         Log.write("launch: accessibility=\(trusted ? "granted" : "DENIED") "
@@ -123,6 +174,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             presentSetup()
         }
+
+        if settings.hasCompletedOnboarding {
+            scheduleInitialUpdateCheck()
+        }
     }
 
     private func mergeCrossBuildContentIfNeeded() {
@@ -148,10 +203,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Accessibility grant may have changed. A pending coach survives the
         // permission-skip path and is retried here.
         presentFirstDictationCoachIfReady()
+        refreshStatusMenu()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         NotificationCenter.default.removeObserver(self, name: .whisprDeveloperTestModeActivated, object: nil)
+        initialUpdateCheckWork?.cancel()
+        periodicUpdateTimer?.invalidate()
+        updateStatusObservation?.cancel()
         hotkey?.stop()
         speechEngineStartupWork?.cancel()
         asr?.shutdown()
@@ -173,7 +232,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.settings.hasCompletedOnboarding = true
             self.startSpeechEngine()
             self.queueFirstDictationCoachIfNeeded()
+            self.scheduleInitialUpdateCheck()
         }
+    }
+
+    // MARK: - App updates
+
+    private func setUpUpdateMonitoring() {
+        updateStatusObservation = updates.$status
+            .removeDuplicates()
+            .sink { [weak self] status in
+                self?.handleUpdateStatus(status)
+            }
+
+        periodicUpdateTimer = Timer.scheduledTimer(
+            withTimeInterval: 6 * 60 * 60,
+            repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor in self?.checkForUpdatesIfAppropriate() }
+        }
+    }
+
+    private func scheduleInitialUpdateCheck() {
+        initialUpdateCheckWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.checkForUpdatesIfAppropriate()
+        }
+        initialUpdateCheckWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: work)
+    }
+
+    private func checkForUpdatesIfAppropriate() {
+        guard settings.hasCompletedOnboarding else { return }
+        switch updates.status {
+        case .idle, .upToDate, .failed:
+            updates.checkForUpdates()
+        case .checking, .available, .downloading, .installing:
+            break
+        }
+    }
+
+    private func handleUpdateStatus(_ status: AppUpdateManager.Status) {
+        // `@Published` delivers from `willSet`, so `updates.status` still holds
+        // the previous value while this callback is running. Use the emitted
+        // value directly to keep the badge and menu in sync on the first frame.
+        refreshStatusMenu(using: status)
+        guard settings.hasCompletedOnboarding,
+              case let .available(release) = status,
+              updatePromptPolicy.shouldPresent(version: release.version)
+        else { return }
+
+        updatePromptPolicy.markPresented(version: release.version)
+        windows.showUpdatePrompt(updates: updates)
     }
 
     private func queueFirstDictationCoachIfNeeded() {
@@ -207,6 +317,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startSpeechEngine() {
         guard asr == nil else { return }
         isASRReady = false
+        isRewarmingSpeechEngine = false
+        speechEngineWarmupGate.reset()
         state.phase = .loading
         do {
             try launchSpeechEngine()
@@ -284,12 +396,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self,
                   self.speechEngineGeneration == generation,
                   !self.isASRReady else { return }
-            Log.write("speech engine startup timed out after \(Int(Self.speechEngineStartupTimeout))s")
+            let operation = self.isRewarmingSpeechEngine ? "warm-up" : "startup"
+            Log.write("speech engine \(operation) timed out after \(Int(Self.speechEngineStartupTimeout))s")
             self.settings.isReloadingModel = false
             self.speechEngineGeneration &+= 1
             self.asr?.shutdown()
             self.asr = nil
-            self.state.phase = .failed("Speech engine took too long to start")
+            self.isRewarmingSpeechEngine = false
+            self.speechEngineWarmupGate.reset()
+            self.state.phase = .failed("Speech engine took too long to \(operation == "warm-up" ? "warm up" : "start")")
             self.panel.present()
             self.refreshStatusMenu()
         }
@@ -358,6 +473,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         speechEngineStartupWork?.cancel()
         speechEngineGeneration &+= 1
         isASRReady = false
+        isRewarmingSpeechEngine = false
+        speechEngineWarmupGate.reset()
         speechEngineStartedAt = nil
         asr?.shutdown()
         asr = nil
@@ -378,15 +495,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setUpStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.image = NSImage(
+        guard let button = statusItem.button else { return }
+        button.image = NSImage(
             systemSymbolName: "waveform",
             accessibilityDescription: "WhisprStream"
         )
+        button.image?.isTemplate = true
+        button.imagePosition = .imageOnly
+
+        let dot = StatusUpdateDotView()
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        dot.setAccessibilityElement(false)
+        button.addSubview(dot, positioned: .above, relativeTo: nil)
+        NSLayoutConstraint.activate([
+            dot.widthAnchor.constraint(equalToConstant: 7),
+            dot.heightAnchor.constraint(equalToConstant: 7),
+            dot.centerXAnchor.constraint(equalTo: button.centerXAnchor, constant: 5),
+            dot.centerYAnchor.constraint(equalTo: button.centerYAnchor, constant: 5),
+        ])
+        statusUpdateDot = dot
         refreshStatusMenu()
     }
 
-    private func refreshStatusMenu() {
+    private func refreshStatusMenu(using emittedStatus: AppUpdateManager.Status? = nil) {
+        let updateStatus = emittedStatus ?? updates.status
         let menu = NSMenu()
+        let showsUpdateDot = updateStatus.showsUpdateAttention
+        updateStatusButtonBadge(isVisible: showsUpdateDot)
+
+        switch updateStatus {
+        case .available:
+            statusItem.button?.toolTip = "WhisprStream — update available"
+        case .downloading, .installing:
+            statusItem.button?.toolTip = "WhisprStream — installing update"
+        case .idle, .checking, .upToDate, .failed:
+            statusItem.button?.toolTip = "WhisprStream"
+        }
 
         let verb = settings.activationMode == .hold ? "Hold" : "Tap"
         let hintTitle: String
@@ -403,6 +547,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         hint.isEnabled = false
         menu.addItem(hint)
+
+        switch updateStatus {
+        case let .available(release):
+            menu.addItem(.separator())
+            let updateItem = menu.addItem(
+                withTitle: "Update WhisprStream to \(release.version)…",
+                action: #selector(openUpdatePrompt),
+                keyEquivalent: ""
+            )
+            updateItem.image = NSImage(
+                systemSymbolName: "arrow.down.circle.fill",
+                accessibilityDescription: "Update available"
+            )
+            updateItem.target = self
+        case let .downloading(release):
+            menu.addItem(.separator())
+            let item = NSMenuItem(
+                title: "Downloading WhisprStream \(release.version)…",
+                action: nil,
+                keyEquivalent: ""
+            )
+            item.isEnabled = false
+            menu.addItem(item)
+        case let .installing(release):
+            menu.addItem(.separator())
+            let item = NSMenuItem(
+                title: "Installing WhisprStream \(release.version)…",
+                action: nil,
+                keyEquivalent: ""
+            )
+            item.isEnabled = false
+            menu.addItem(item)
+        case .idle, .checking, .upToDate, .failed:
+            break
+        }
+
         menu.addItem(.separator())
 
         menu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
@@ -421,8 +601,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
     }
 
-    @objc private func openSettings() { windows.showSettings(settings, runtime: runtime) }
-    @objc private func openAbout() { windows.showAbout() }
+    private func updateStatusButtonBadge(isVisible: Bool) {
+        statusUpdateDot?.isHidden = !isVisible
+        statusUpdateDot?.needsDisplay = isVisible
+    }
+
+    @objc private func openSettings() {
+        windows.showSettings(settings, runtime: runtime, updates: updates)
+    }
+
+    @objc private func openAbout() { windows.showAbout(updates: updates) }
+
+    @objc private func openUpdatePrompt() { windows.showUpdatePrompt(updates: updates) }
 
     @objc private func openDeveloperTestSetup() { presentSetup() }
 
@@ -441,6 +631,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             state.phase = .loading
             panel.present()
+            return false
+        }
+        if speechEngineWarmupGate.requiresWarmup() {
+            beginIdleSpeechEngineWarmup()
             return false
         }
         guard state.phase != .listening else { return false }
@@ -490,6 +684,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func beginIdleSpeechEngineWarmup() {
+        guard isASRReady, !isRewarmingSpeechEngine, asr != nil else { return }
+        dismissWork?.cancel()
+        isASRReady = false
+        isRewarmingSpeechEngine = true
+        state.reset()
+        state.phase = .loading
+        panel.present()
+        speechEngineStartedAt = ProcessInfo.processInfo.systemUptime
+        Log.write("speech engine idle lease expired; starting readiness warm-up")
+        asr.warmUp()
+        armSpeechEngineStartupTimeout(generation: speechEngineGeneration)
+        refreshStatusMenu()
+    }
+
     private func endDictation() {
         // Releasing the shortcut during first-launch warm-up must not dismiss
         // the HUD. Startup completion owns that lifecycle and replaces it with
@@ -512,25 +721,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func handle(_ event: ASRService.Event) {
         switch event {
         case let .ready(ms):
-            let wallMS = speechEngineStartedAt.map {
-                Int((ProcessInfo.processInfo.systemUptime - $0) * 1000)
-            } ?? ms
-            Log.write("speech engine ready: reported=\(ms)ms wall=\(wallMS)ms")
-            speechEngineStartupWork?.cancel()
-            speechEngineStartupWork = nil
-            speechEngineStartedAt = nil
-            isASRReady = true
-            settings.isReloadingModel = false
-            presentFirstDictationCoachIfReady()
-            if state.phase == .loading {
-                if panel.isVisible {
-                    state.phase = .ready
-                    scheduleDismiss(after: 0.65)
-                } else {
-                    state.phase = .idle
-                }
-            }
-            refreshStatusMenu()
+            completeSpeechEngineWarmup(ms: ms, kind: "startup")
+
+        case let .warmed(ms):
+            completeSpeechEngineWarmup(ms: ms, kind: "idle")
 
         case let .partial(committed, tail):
             guard state.phase == .listening else { return }
@@ -538,6 +732,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             state.tail = tail
 
         case let .final(text, secs, ms):
+            speechEngineWarmupGate.markActivity()
             precedingTextAtDictationStart = nil
             state.lastAudioSecs = secs
             state.lastDurationMS = ms
@@ -589,6 +784,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 speechEngineGeneration &+= 1
                 asr?.shutdown()
                 asr = nil
+                isRewarmingSpeechEngine = false
+                speechEngineWarmupGate.reset()
                 settings.isReloadingModel = false
                 refreshStatusMenu()
             }
@@ -603,6 +800,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             speechEngineStartedAt = nil
             speechEngineGeneration &+= 1
             isASRReady = false
+            isRewarmingSpeechEngine = false
+            speechEngineWarmupGate.reset()
             asr = nil
             settings.isReloadingModel = false
             state.stopDictationTimer()
@@ -610,6 +809,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             refreshStatusMenu()
             scheduleDismiss(after: 1.8)
         }
+    }
+
+    private func completeSpeechEngineWarmup(ms: Int, kind: String) {
+        let wallMS = speechEngineStartedAt.map {
+            Int((ProcessInfo.processInfo.systemUptime - $0) * 1000)
+        } ?? ms
+        Log.write("speech engine ready: kind=\(kind) reported=\(ms)ms wall=\(wallMS)ms")
+        speechEngineStartupWork?.cancel()
+        speechEngineStartupWork = nil
+        speechEngineStartedAt = nil
+        isASRReady = true
+        isRewarmingSpeechEngine = false
+        speechEngineWarmupGate.markActivity()
+        settings.isReloadingModel = false
+        presentFirstDictationCoachIfReady()
+        if state.phase == .loading {
+            if panel.isVisible {
+                state.phase = .ready
+                scheduleDismiss(after: 0.65)
+            } else {
+                state.phase = .idle
+            }
+        }
+        refreshStatusMenu()
     }
 
     private func deliverPendingTranscriptIfReady() {

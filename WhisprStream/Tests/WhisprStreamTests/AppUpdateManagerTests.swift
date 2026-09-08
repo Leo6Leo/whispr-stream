@@ -31,6 +31,18 @@ final class AppUpdateManagerTests: XCTestCase {
         )
     }
 
+    func testAutomaticPromptAppearsOnlyOnceForEachRelease() throws {
+        let suiteName = "AppUpdatePromptPolicyTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let policy = AppUpdatePromptPolicy(defaults: defaults)
+
+        XCTAssertTrue(policy.shouldPresent(version: "1.1.0"))
+        policy.markPresented(version: "1.1.0")
+        XCTAssertFalse(policy.shouldPresent(version: "1.1.0"))
+        XCTAssertTrue(policy.shouldPresent(version: "1.2.0"))
+    }
+
     func testSelectsExactSignedAssetsForNewerStableRelease() throws {
         let update = try XCTUnwrap(
             AppUpdateManager.release(from: release(), currentVersion: "1.0.1")
@@ -202,6 +214,42 @@ final class AppUpdateManagerTests: XCTestCase {
         }
         XCTAssertEqual(update.version, "1.0.2")
         XCTAssertEqual(update.archiveURL, archiveURL)
+    }
+
+    @MainActor
+    func testSimulatedUpdateSupersedesAnInFlightRealCheck() async throws {
+        let feedURL = URL(string: "http://127.0.0.1:8765/latest.json")!
+        MockUpdateURLProtocol.responses = [feedURL: Data("""
+        {
+          "tag_name": "v1.0.2",
+          "html_url": "https://github.com/Leo6Leo/whispr-stream/releases/tag/v1.0.2",
+          "draft": false,
+          "prerelease": false,
+          "assets": []
+        }
+        """.utf8)]
+        defer { MockUpdateURLProtocol.responses = [:] }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockUpdateURLProtocol.self]
+        let key = Curve25519.Signing.PrivateKey().publicKey.rawRepresentation.base64EncodedString()
+        let manager = AppUpdateManager(
+            repository: "Leo6Leo/whispr-stream",
+            currentVersion: "1.0.2",
+            bundleIdentifier: "dev.local.whisprstream",
+            publicKey: key,
+            appBundleURL: URL(fileURLWithPath: "/tmp/WhisprStream.app"),
+            session: URLSession(configuration: configuration),
+            developerFeedURL: feedURL
+        )
+
+        manager.checkForUpdates()
+        manager.presentSimulatedUpdate(version: "1.1.0", allowInThisBuild: true)
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        guard case let .available(release) = manager.status else {
+            return XCTFail("Expected the simulated release to remain visible")
+        }
+        XCTAssertEqual(release.version, "1.1.0")
     }
 
     func testDeveloperFeedEnvironmentOverrideIsDebugOnlyAndRequiresAURL() {

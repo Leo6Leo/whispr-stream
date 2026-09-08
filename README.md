@@ -49,7 +49,7 @@ Custom Qwen3-ASR and MLX Whisper models are still under development. They are be
 - If an engine installation fails, open **Settings → Engine** and use **Install** or **Repair / Reinstall**. This replaces only the managed engine.
 - If a model download is interrupted, open **Settings → Model** and choose **Clear Partial Data**. Cleanup is limited to unfinished files for that model; installed models and settings are untouched.
 - A cancelled or crashed model download releases its lock automatically, so stale state cannot permanently block cleanup.
-- **Settings → About → Check for Updates** downloads, verifies, installs, and relaunches stable updates in place. If the app is running from a read-only location, the same screen offers the GitHub Release page instead. The engine, model cache, preferences, vocabulary, and shortcuts are preserved.
+- WhisprStream checks for stable updates after launch and periodically while it is running. A new release gets one friendly prompt plus a persistent accent-colored dot beside the menu bar icon and a banner in Settings until it is installed. **Update & Relaunch** downloads, verifies, installs, and reopens the app in place; **Settings → About** still supports manual checks. The engine, model cache, preferences, vocabulary, and shortcuts are preserved.
 
 ### Build from source
 

@@ -45,7 +45,9 @@ final class AppUpdateManager: ObservableObject {
     private let session: URLSession
     private let developerFeedURL: URL?
     private var updateTask: Task<Void, Never>?
+    private var updateOperationGeneration = 0
     private var lastRelease: Release?
+    private var isSimulatingUpdate = false
 
     var canOpenReleasePage: Bool {
         lastRelease != nil || repository.flatMap(Self.repositoryReleasesURL) != nil
@@ -90,6 +92,7 @@ final class AppUpdateManager: ObservableObject {
 
     func checkForUpdates() {
         guard updateTask == nil else { return }
+        isSimulatingUpdate = false
         guard let repository, Self.isValidRepository(repository) else {
             status = .failed("This build does not have a valid GitHub update feed configured.")
             return
@@ -100,9 +103,15 @@ final class AppUpdateManager: ObservableObject {
         }
 
         status = .checking
+        updateOperationGeneration &+= 1
+        let generation = updateOperationGeneration
         updateTask = Task { [weak self] in
             guard let self else { return }
-            defer { self.updateTask = nil }
+            defer {
+                if self.updateOperationGeneration == generation {
+                    self.updateTask = nil
+                }
+            }
 
             do {
                 let githubRelease = try await Self.fetchLatestRelease(
@@ -115,14 +124,18 @@ final class AppUpdateManager: ObservableObject {
                     currentVersion: self.currentVersion,
                     allowDeveloperAssetURLs: self.developerFeedURL != nil
                 ) {
+                    guard self.updateOperationGeneration == generation else { return }
                     self.lastRelease = release
                     self.status = .available(release)
                 } else {
+                    guard self.updateOperationGeneration == generation else { return }
                     self.status = .upToDate
                 }
             } catch is CancellationError {
+                guard self.updateOperationGeneration == generation else { return }
                 self.status = .idle
             } catch {
+                guard self.updateOperationGeneration == generation else { return }
                 Log.write("update check failed: \(error.localizedDescription)")
                 self.status = .failed(error.localizedDescription)
             }
@@ -131,15 +144,25 @@ final class AppUpdateManager: ObservableObject {
 
     func installAvailableUpdate() {
         guard updateTask == nil, case let .available(release) = status else { return }
+        if isSimulatingUpdate {
+            installSimulatedUpdate(release)
+            return
+        }
         guard let publicKey else {
             status = .failed("This build does not contain an update-signing key.")
             return
         }
 
         status = .downloading(release)
+        updateOperationGeneration &+= 1
+        let generation = updateOperationGeneration
         updateTask = Task { [weak self] in
             guard let self else { return }
-            defer { self.updateTask = nil }
+            defer {
+                if self.updateOperationGeneration == generation {
+                    self.updateTask = nil
+                }
+            }
 
             do {
                 let prepared = try await Self.downloadAndPrepare(
@@ -148,6 +171,7 @@ final class AppUpdateManager: ObservableObject {
                     expectedBundleIdentifier: self.bundleIdentifier,
                     session: self.session
                 )
+                guard self.updateOperationGeneration == generation else { return }
                 self.status = .installing(release)
                 try await Self.stageAndLaunchInstaller(
                     prepared: prepared,
@@ -158,8 +182,10 @@ final class AppUpdateManager: ObservableObject {
                 Log.write("update: verified version \(release.version); terminating for replacement")
                 NSApp.terminate(nil)
             } catch is CancellationError {
+                guard self.updateOperationGeneration == generation else { return }
                 self.status = .available(release)
             } catch {
+                guard self.updateOperationGeneration == generation else { return }
                 Log.write("update install failed: \(error.localizedDescription)")
                 self.status = .failed(error.localizedDescription)
             }
@@ -176,6 +202,66 @@ final class AppUpdateManager: ObservableObject {
 
     func cancelUpdate() {
         updateTask?.cancel()
+    }
+
+    /// Drives the real update UI through its states without network or disk
+    /// changes. The runtime bundle-identifier gate keeps this out of public
+    /// release behavior even though local app builds use release optimization.
+    func presentSimulatedUpdate(
+        version: String = "1.1.0",
+        allowInThisBuild: Bool = DeveloperTestMode.isAvailable
+    ) {
+        guard allowInThisBuild else { return }
+        if case .downloading = status { return }
+        if case .installing = status { return }
+        guard let pageURL = URL(string: "https://github.com/Leo6Leo/whispr-stream/releases"),
+              let archiveURL = URL(string: "https://github.com/Leo6Leo/whispr-stream/releases/download/preview/WhisprStream-macos-arm64.zip"),
+              let signatureURL = URL(string: "https://github.com/Leo6Leo/whispr-stream/releases/download/preview/WhisprStream-macos-arm64.zip.ed25519")
+        else { return }
+
+        let release = Release(
+            version: version,
+            pageURL: pageURL,
+            archiveURL: archiveURL,
+            signatureURL: signatureURL,
+            archiveBytes: 1
+        )
+        updateTask?.cancel()
+        updateOperationGeneration &+= 1
+        updateTask = nil
+        isSimulatingUpdate = true
+        lastRelease = release
+        status = .available(release)
+    }
+
+    private func installSimulatedUpdate(_ release: Release) {
+        status = .downloading(release)
+        updateOperationGeneration &+= 1
+        let generation = updateOperationGeneration
+        updateTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.updateOperationGeneration == generation {
+                    self.updateTask = nil
+                }
+            }
+
+            do {
+                try await Task.sleep(nanoseconds: 900_000_000)
+                guard self.updateOperationGeneration == generation else { return }
+                self.status = .installing(release)
+                try await Task.sleep(nanoseconds: 1_100_000_000)
+                guard self.updateOperationGeneration == generation else { return }
+                self.isSimulatingUpdate = false
+                self.status = .upToDate
+            } catch is CancellationError {
+                guard self.updateOperationGeneration == generation else { return }
+                self.status = .available(release)
+            } catch {
+                guard self.updateOperationGeneration == generation else { return }
+                self.status = .available(release)
+            }
+        }
     }
 
     // MARK: - Discovery

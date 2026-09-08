@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="22" stdDeviation="24" flood-color="#000000" flood-opacity="0.32"/>
+    </filter>
+  </defs>
+
+  <rect
+    x="72"
+    y="62"
+    width="880"
+    height="880"
+    rx="220"
+    fill="#050505"
+    stroke="#ffffff"
+    stroke-opacity="0.82"
+    stroke-width="4"
+    filter="url(#shadow)"
+  />
+
+  <g fill="none" stroke="#ffffff" stroke-width="44" stroke-linecap="round">
+    <path d="M232 457V567"/>
+    <path d="M332 365V659"/>
+    <path d="M422 426V598"/>
+    <path d="M512 334V690"/>
+    <path d="M602 250V774"/>
+    <path d="M692 336V688"/>
+    <path d="M782 420V604"/>
+  </g>
+  <circle cx="872" cy="512" r="22" fill="#ffffff"/>
+</svg>

@@ -50,7 +50,7 @@ WhisprStream runs in the menu bar rather than the Dock. Choose **Setup Guide…*
 
 ## Updates
 
-In **Settings → About**, choose **Check for Updates**. When a stable update is available, **Install and Relaunch** downloads the app ZIP, verifies its Ed25519 release signature, replaces the installed app, and reopens it. If WhisprStream is running from a read-only location, move it to Applications and try again or use **Open GitHub Releases…** for a manual replacement. The runtime, models, settings, vocabulary, and shortcuts remain in your user Library.
+WhisprStream checks for stable updates shortly after launch and every six hours while it remains open. Each new release gets one automatic prompt; choosing **Not Now** dismisses that prompt while leaving an accent-colored dot beside the menu bar icon and an update banner in Settings. **Update & Relaunch** downloads the app ZIP, verifies its Ed25519 release signature, replaces the installed app, and reopens it. You can also check manually in **Settings → About**. If WhisprStream is running from a read-only location, move it to Applications and try again or use **Open GitHub Releases…** for a manual replacement. The runtime, models, settings, vocabulary, and shortcuts remain in your user Library.
 
 ## Uninstall
 

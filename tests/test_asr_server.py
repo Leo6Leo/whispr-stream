@@ -14,6 +14,26 @@ sys.path.insert(0, str(RESOURCES))
 import asr_server  # noqa: E402
 
 
+class WarmupTests(unittest.TestCase):
+    def test_warmup_runs_silent_inference_before_acknowledging_ready(self):
+        calls = []
+        server = asr_server.Server.__new__(asr_server.Server)
+        server.session = SimpleNamespace(
+            transcribe=lambda audio: calls.append(audio.copy())
+        )
+
+        with patch.object(asr_server, "emit") as emitted:
+            server.warmup()
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].dtype, np.float32)
+        self.assertEqual(len(calls[0]), asr_server.SAMPLE_RATE)
+        self.assertTrue(np.all(calls[0] == 0))
+        event = emitted.call_args.args[0]
+        self.assertEqual(event["type"], "warmed")
+        self.assertGreaterEqual(event["ms"], 0)
+
+
 class SilenceDetectionTests(unittest.TestCase):
     def test_audio_buffer_has_headroom_over_ui_limit(self):
         self.assertGreater(asr_server.MAX_BUFFER_SEC, 45.0)

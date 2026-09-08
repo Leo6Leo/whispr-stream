@@ -686,6 +686,20 @@ class Server:
         self._thread: threading.Thread | None = None
         self._preview_stop = threading.Event()
 
+    def warmup(self) -> None:
+        """Prove the resident model is inference-ready after a long idle.
+
+        Loading weights is not enough: macOS may page model memory out and MLX
+        may need to restore its execution resources after inactivity. A silent
+        pass pays that cost before Swift permits the next recording to begin.
+        """
+        started = time.perf_counter()
+        self.session.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32))
+        emit({
+            "type": "warmed",
+            "ms": int((time.perf_counter() - started) * 1000),
+        })
+
     # -- transcription -------------------------------------------------
     def _language_for_audio(self, audio: np.ndarray) -> str | None:
         if len(audio) <= int(SHORT_UTTERANCE_MAX_SEC * SAMPLE_RATE):
@@ -1241,6 +1255,8 @@ def main() -> int:
         try:
             if cmd == "start":
                 server.start(msg.get("short_utterance_language"))
+            elif cmd == "warmup":
+                server.warmup()
             elif cmd == "audio":
                 server.audio(msg["pcm"])
             elif cmd == "stop":

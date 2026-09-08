@@ -1,0 +1,64 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:whispr-stream}/WhisprStream",
+            "name": "Debug WhisprStream (WhisprStream)",
+            "target": "WhisprStream",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug WhisprStream (WhisprStream)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:whispr-stream}/WhisprStream",
+            "name": "Release WhisprStream (WhisprStream)",
+            "target": "WhisprStream",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release WhisprStream (WhisprStream)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:whispr-stream}/WhisprStream",
+            "name": "Debug WhisprStreamUpdateInstaller (WhisprStream)",
+            "target": "WhisprStreamUpdateInstaller",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug WhisprStreamUpdateInstaller (WhisprStream)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:whispr-stream}/WhisprStream",
+            "name": "Release WhisprStreamUpdateInstaller (WhisprStream)",
+            "target": "WhisprStreamUpdateInstaller",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release WhisprStreamUpdateInstaller (WhisprStream)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:whispr-stream}/WhisprStream",
+            "name": "Debug WhisprStreamUpdateSigner (WhisprStream)",
+            "target": "WhisprStreamUpdateSigner",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug WhisprStreamUpdateSigner (WhisprStream)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:whispr-stream}/WhisprStream",
+            "name": "Release WhisprStreamUpdateSigner (WhisprStream)",
+            "target": "WhisprStreamUpdateSigner",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release WhisprStreamUpdateSigner (WhisprStream)"
+        }
+    ]
+}

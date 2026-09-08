@@ -8,6 +8,7 @@ import Foundation
 final class ASRService {
     enum Event {
         case ready(ms: Int)
+        case warmed(ms: Int)
         case partial(committed: String, tail: String)
         case final(text: String, secs: Double, ms: Int)
         case error(String)
@@ -104,6 +105,8 @@ final class ASRService {
             switch type {
             case "ready":
                 event = .ready(ms: obj["ms"] as? Int ?? 0)
+            case "warmed":
+                event = .warmed(ms: obj["ms"] as? Int ?? 0)
             case "partial":
                 event = .partial(
                     committed: obj["committed"] as? String ?? "",
@@ -198,6 +201,9 @@ final class ASRService {
         }
         send(command)
     }
+    /// Run a real silent inference pass. This is used after a long idle period
+    /// so memory paging and Metal graph restoration happen before recording.
+    func warmUp() { send(["cmd": "warmup"]) }
     func stopUtterance() { send(["cmd": "stop"]) }
 
     /// Push edited vocabulary to the resident sidecar. The model is not reloaded,

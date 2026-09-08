@@ -9,23 +9,46 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var settings: Settings
     @ObservedObject var runtime: RuntimeManager
+    @ObservedObject var updates: AppUpdateManager
+    let onShowUpdate: () -> Void
     @State private var selectedSection: SettingsSection? = .general
 
     var body: some View {
         HStack(spacing: 0) {
             List(SettingsSection.allCases, selection: $selectedSection) { section in
-                Label(section.title, systemImage: section.symbol)
-                    .tag(section)
+                HStack(spacing: 8) {
+                    Label(section.title, systemImage: section.symbol)
+                    Spacer(minLength: 4)
+                    if section == .about, updates.status.showsUpdateAttention {
+                        Circle()
+                            .fill(Color.accentColor)
+                            .frame(width: 7, height: 7)
+                            .accessibilityLabel("Update available")
+                    }
+                }
+                .tag(section)
             }
             .listStyle(.sidebar)
             .frame(width: 160)
 
             Divider()
 
-            selectedContent
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            VStack(spacing: 0) {
+                if let release = updates.status.availableRelease {
+                    SettingsUpdateBanner(release: release, action: onShowUpdate)
+                    Divider()
+                }
+
+                selectedContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
         .frame(width: 760, height: 540)
+        .onAppear {
+            if case .idle = updates.status {
+                updates.checkForUpdates()
+            }
+        }
     }
 
     @ViewBuilder
@@ -37,8 +60,43 @@ struct SettingsView: View {
         case .shortcuts: VoiceShortcutsView(settings: settings)
         case .permissions: PermissionsTab()
         case .engine: RuntimeTab(runtime: runtime)
-        case .about: AboutTab(settings: settings)
+        case .about:
+            AboutTab(
+                settings: settings,
+                updates: updates,
+                onShowUpdate: onShowUpdate
+            )
         }
+    }
+}
+
+private struct SettingsUpdateBanner: View {
+    let release: AppUpdateManager.Release
+    let action: () -> Void
+
+    var body: some View {
+        HStack(spacing: 11) {
+            Image(systemName: "arrow.down.circle.fill")
+                .font(.system(size: 19))
+                .foregroundStyle(Color.accentColor)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("WhisprStream \(release.version) is available")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("Your models and settings will stay in place.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Button("Review Update", action: action)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
+        .background(Color.accentColor.opacity(0.08))
     }
 }
 
@@ -711,7 +769,8 @@ private struct PermissionRow: View {
 
 private struct AboutTab: View {
     @ObservedObject var settings: Settings
-    @StateObject private var updates = AppUpdateManager()
+    @ObservedObject var updates: AppUpdateManager
+    let onShowUpdate: () -> Void
 
     private var version: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
@@ -719,14 +778,11 @@ private struct AboutTab: View {
 
     var body: some View {
         VStack(spacing: 18) {
-            Image(systemName: "waveform")
-                .font(.system(size: 46, weight: .medium))
-                .foregroundStyle(Color.accentColor)
+            WhisprStreamBrandLogo()
+                .frame(width: 235, height: 34)
                 .padding(.top, 34)
 
             VStack(spacing: 5) {
-                Text("WhisprStream")
-                    .font(.system(size: 22, weight: .semibold, design: .rounded))
                 Text("Version \(version)")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
@@ -746,11 +802,15 @@ private struct AboutTab: View {
             }
             .padding(.top, 4)
 
-            updateSection
+            AppUpdateControls(updates: updates, onShowUpdate: onShowUpdate)
 
             Spacer()
         }
-        .onAppear { updates.checkForUpdates() }
+        .onAppear {
+            if case .idle = updates.status {
+                updates.checkForUpdates()
+            }
+        }
     }
 
     private func detail(_ key: String, _ value: String) -> some View {
@@ -765,8 +825,13 @@ private struct AboutTab: View {
         }
     }
 
-    @ViewBuilder
-    private var updateSection: some View {
+}
+
+private struct AppUpdateControls: View {
+    @ObservedObject var updates: AppUpdateManager
+    let onShowUpdate: () -> Void
+
+    var body: some View {
         VStack(spacing: 7) {
             switch updates.status {
             case .idle:
@@ -829,6 +894,19 @@ private struct AboutTab: View {
                     }
                 }
             }
+
+            if DeveloperTestMode.isAvailable {
+                Divider()
+                    .frame(width: 160)
+                    .padding(.top, 5)
+                Button("Test Available Update") {
+                    updates.presentSimulatedUpdate()
+                    onShowUpdate()
+                }
+                .buttonStyle(.link)
+                .font(.caption)
+                .help("Development only — no update is downloaded or installed")
+            }
         }
         .multilineTextAlignment(.center)
         .padding(.top, 4)
@@ -836,20 +914,20 @@ private struct AboutTab: View {
 }
 
 struct AboutView: View {
+    @ObservedObject var updates: AppUpdateManager
+    let onShowUpdate: () -> Void
+
     private var version: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
     }
 
     var body: some View {
         VStack(spacing: 18) {
-            Image(systemName: "waveform")
-                .font(.system(size: 46, weight: .medium))
-                .foregroundStyle(Color.accentColor)
+            WhisprStreamBrandLogo()
+                .frame(width: 235, height: 34)
                 .padding(.top, 34)
 
             VStack(spacing: 5) {
-                Text("WhisprStream")
-                    .font(.system(size: 22, weight: .semibold, design: .rounded))
                 Text("Version \(version)")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
@@ -871,10 +949,17 @@ struct AboutView: View {
             }
             .padding(.top, 4)
 
+            AppUpdateControls(updates: updates, onShowUpdate: onShowUpdate)
+
             Spacer()
         }
-        .frame(width: 380, height: 350)
+        .frame(width: 420, height: 430)
         .background(.regularMaterial)
+        .onAppear {
+            if case .idle = updates.status {
+                updates.checkForUpdates()
+            }
+        }
     }
 
     private func detail(_ key: String, _ value: String) -> some View {
