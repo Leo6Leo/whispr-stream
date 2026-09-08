@@ -23,3 +23,10 @@ warmup-preview/
 
 # macOS
 .DS_Store
+
+# build-runtime.sh / release outputs (generated at release time, attached to GitHub Releases)
+/WhisprStream-runtime-*-arm64.zip
+/WhisprStream-runtime-*.metadata.json
+/WhisprStream-macos-arm64.zip
+/WhisprStream-macos-arm64.zip.ed25519
+/SHA256SUMS
