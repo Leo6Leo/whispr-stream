@@ -38,6 +38,11 @@ To test the public configuration from source, build with `ENABLE_OPTIONAL_MODELS
 
 Onboarding asks for Microphone access and Accessibility access. Microphone is needed to capture speech; Accessibility is needed to see the recording shortcut globally and insert text at the cursor. If you choose **Skip for now**, the final screen will say **Finish setup later** and you can grant access from **Settings → Permissions**.
 
+Click **Grant** in the Setup Guide's microphone step, or **Grant Access** under
+**Settings → Permissions**, to show the macOS consent dialog. Moving the app into
+Applications alone does not add it to the system's Microphone list. If access was
+previously denied, the app opens System Settings so you can enable it there.
+
 WhisprStream runs in the menu bar rather than the Dock. Choose **Setup Guide…** from the menu-bar icon to reopen onboarding. Choose **Settings…** for model, engine, permissions, vocabulary, shortcuts, and preferences.
 
 ## Recovery and storage cleanup

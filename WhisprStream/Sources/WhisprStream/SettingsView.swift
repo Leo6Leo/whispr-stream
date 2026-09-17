@@ -659,7 +659,8 @@ private struct PermissionsTab: View {
                     title: "Microphone",
                     detail: "Required to hear you. Audio is transcribed on-device.",
                     granted: permissions.microphone == .authorized,
-                    open: { permissions.openSettings(.microphone) }
+                    actionTitle: permissions.microphone == .notDetermined ? "Grant Access" : "Open Settings",
+                    open: { permissions.requestMicrophone() }
                 )
                 PermissionRow(
                     title: "Accessibility",
@@ -687,6 +688,7 @@ private struct PermissionRow: View {
     let title: String
     let detail: String
     let granted: Bool
+    var actionTitle: String = "Open Settings"
     let open: () -> Void
 
     var body: some View {
@@ -697,7 +699,7 @@ private struct PermissionRow: View {
                     .labelStyle(.titleAndIcon)
                     .font(.callout)
             } else {
-                Button("Open Settings", action: open)
+                Button(actionTitle, action: open)
             }
         } label: {
             Text(title)

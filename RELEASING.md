@@ -49,7 +49,7 @@ App version `1.0.2` intentionally reuses runtime version `1.0.0`; the runtime
 version changes only when the standalone Python or dependency payload changes.
 
 ```bash
-RELEASE=1 VERSION=1.0.2 BUILD_NUMBER=4 ENABLE_OPTIONAL_MODELS=0 \
+RELEASE=1 VERSION=1.0.2 BUILD_NUMBER=5 ENABLE_OPTIONAL_MODELS=0 \
 BUNDLE_IDENTIFIER="com.leoleo.whisprstream" \
 SIGNING_IDENTITY="WhisprStream Self-Signed" \
 RUNTIME_VERSION=1.0.0 \
@@ -64,6 +64,13 @@ WhisprStream/build.sh
 `RELEASE=1` fails if optional models are enabled, if any runtime value is missing, malformed, zero, non-HTTPS, or if the bundle identifier is not `com.leoleo.whisprstream`. It also fails without a signing identity; it never silently falls back to ad-hoc signing. Release compilation remaps the repository root to `/src`, strips linker-generated `N_OSO` debug records, and both the builder and validator reject executables containing `/Users/` or `/home/` build-machine paths.
 The same release identity is also applied to the update-signing utility so it
 can reuse the protected Keychain item when the utility is rebuilt.
+
+The main app is signed with `WhisprStream/WhisprStream.entitlements`, including
+`com.apple.security.device.audio-input`. Hardened Runtime requires this even
+without App Sandbox; `NSMicrophoneUsageDescription` alone is insufficient.
+The builder and archive validator inspect the signed app for both requirements.
+Updater helpers do not receive microphone access. Run the packaging regression
+tests with `pytest tests/test_microphone_packaging.py` on macOS.
 
 Archive the app with macOS metadata preserved:
 
@@ -87,7 +94,7 @@ shasum -a 256 WhisprStream-macos-arm64.zip \
   WhisprStream-runtime-1.0.0-arm64.zip > SHA256SUMS
 WhisprStream/validate-release.sh WhisprStream-macos-arm64.zip \
   WhisprStream-runtime-1.0.0-arm64.zip SHA256SUMS \
-  WhisprStream-macos-arm64.zip.ed25519 1.0.2 4
+  WhisprStream-macos-arm64.zip.ed25519 1.0.2 5
 ```
 
 ## Local updater dry runs
@@ -154,6 +161,19 @@ Then download both assets back from GitHub and verify their hashes. Before publi
 - offline, insufficient-space, cancelled-download, checksum-failure, partial-model-cleanup, permission-skip, and update scenarios.
 
 Record failure-state screenshots and logs. Verify that an app replacement preserves the runtime, model cache, and permissions; document any Accessibility re-grant honestly if macOS requires it.
+
+On a fresh macOS user account with no previous microphone grant, explicitly verify:
+
+- In Setup Guide, click **Grant** on the microphone step. The native macOS consent
+  dialog must appear and WhisprStream must appear in Privacy & Security → Microphone.
+- Allow access and complete an actual dictation after installing the engine/model.
+- In a separate fresh account, skip microphone setup and use Settings → Permissions
+  → **Grant Access**. This must also show the native prompt.
+- Deny access, then retry from the app. It must open the microphone settings pane;
+  enabling access and relaunching when macOS requests it must restore dictation.
+
+Moving an app into Applications does not register a microphone request. Local
+non-hardened builds and accounts with existing grants do not qualify this check.
 
 ## 5. Website and update checks
 
