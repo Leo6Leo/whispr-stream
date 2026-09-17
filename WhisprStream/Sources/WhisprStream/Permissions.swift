@@ -43,6 +43,9 @@ final class Permissions: ObservableObject {
     // MARK: - Requests
 
     func requestMicrophone() {
+        // A click can arrive before the next poll after returning from Settings.
+        refresh()
+        guard microphone != .authorized else { return }
         guard microphone == .notDetermined else {
             openSettings(.microphone)
             return

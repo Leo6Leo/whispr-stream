@@ -10,7 +10,7 @@ PROJECT_ROOT="$(cd .. && pwd)"
 PYTHON="${PYTHON:-$PROJECT_ROOT/.venv/bin/python}"
 APP="${APP:-$PROJECT_ROOT/WhisprStream.app}"
 VERSION="${VERSION:-1.0.2}"
-BUILD_NUMBER="${BUILD_NUMBER:-4}"
+BUILD_NUMBER="${BUILD_NUMBER:-5}"
 RELEASE="${RELEASE:-0}"
 ENABLE_OPTIONAL_MODELS="${ENABLE_OPTIONAL_MODELS:-}"
 RUNTIME_URL="${RUNTIME_URL:-}"
@@ -242,10 +242,9 @@ $DEVELOPMENT_PYTHON_PLIST
 </plist>
 PLIST
 
-# No entitlements: the app is not sandboxed, so com.apple.security.* keys buy
-# nothing and attaching them to an ad-hoc signature confuses TCC. Microphone
-# access comes from NSMicrophoneUsageDescription; Accessibility is granted by
-# the user in System Settings.
+# Hardened Runtime requires the audio-input entitlement even without App
+# Sandbox. NSMicrophoneUsageDescription alone cannot enable the TCC prompt.
+# Only the app captures audio; updater helpers do not receive this entitlement.
 #
 # An ad-hoc signature is tied to the binary hash, so every rebuild looks like a
 # different app to TCC and silently drops the Accessibility grant. A self-signed
@@ -290,7 +289,8 @@ codesign_force --sign "$IDENTITY" \
     "$APP/Contents/Helpers/WhisprStreamUpdateInstaller"
 # Nested code is signed explicitly above; signing the outer bundle without
 # --deep prevents codesign from making implicit nested-code decisions.
-codesign_force --sign "$IDENTITY" "$APP"
+codesign_force --sign "$IDENTITY" --entitlements "$PROJECT_ROOT/WhisprStream/WhisprStream.entitlements" "$APP"
+bash "$PROJECT_ROOT/WhisprStream/validate-microphone-permission.sh" "$APP"
 if [ "$RELEASE" = "1" ]; then
     codesign --verify --strict --deep "$APP"
     codesign --verify --strict --deep \

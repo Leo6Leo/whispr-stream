@@ -84,6 +84,7 @@ assert_hardened_runtime() {
 }
 assert_hardened_runtime "$APP_DIR"
 assert_hardened_runtime "$UPDATE_INSTALLER"
+bash "$SCRIPT_DIR/validate-microphone-permission.sh" "$APP_DIR"
 
 plist() { /usr/libexec/PlistBuddy -c "Print :$1" "$APP_DIR/Contents/Info.plist" 2>/dev/null; }
 required_plist() {
