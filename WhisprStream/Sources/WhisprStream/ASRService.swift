@@ -5,12 +5,12 @@ import Foundation
 ///
 /// The model load takes several seconds and must happen exactly once, so the
 /// process is started at launch and kept alive for the lifetime of the app.
+/// After its one startup warm-up, it waits for commands without idle inference.
 final class ASRService {
     enum Event {
         case ready(ms: Int)
-        case warmed(ms: Int)
         case partial(committed: String, tail: String)
-        case final(text: String, secs: Double, ms: Int)
+        case final(text: String, secs: Double, ms: Int, review: DictationReview? = nil)
         case error(String)
         case terminated(String)
     }
@@ -34,7 +34,8 @@ final class ASRService {
         engine: ASREngine = .qwen3,
         bits: Int,
         context: String,
-        shortUtteranceLanguage: ShortUtteranceLanguage
+        shortUtteranceLanguage: ShortUtteranceLanguage,
+        learnedContext: String = ""
     ) {
         process.executableURL = python
         process.arguments = PythonProcessEnvironment.scriptArguments(script: script)
@@ -52,6 +53,7 @@ final class ASRService {
             "WHISPR_ENGINE": engine.rawValue,
             "WHISPR_BITS": String(bits),
             "WHISPR_CONTEXT": context,
+            "WHISPR_LEARNED_CONTEXT": learnedContext,
             "WHISPR_SHORT_UTTERANCE_LANGUAGE":
                 shortUtteranceLanguage.fixedModelLanguage ?? "",
         ])
@@ -105,8 +107,6 @@ final class ASRService {
             switch type {
             case "ready":
                 event = .ready(ms: obj["ms"] as? Int ?? 0)
-            case "warmed":
-                event = .warmed(ms: obj["ms"] as? Int ?? 0)
             case "partial":
                 event = .partial(
                     committed: obj["committed"] as? String ?? "",
@@ -128,7 +128,8 @@ final class ASRService {
                 event = .final(
                     text: obj["text"] as? String ?? "",
                     secs: seconds,
-                    ms: inferenceMS
+                    ms: inferenceMS,
+                    review: DictationReview.parse(obj["review"], transcript: obj["text"] as? String ?? "")
                 )
             default:
                 let message = obj["message"] as? String ?? "unknown"
@@ -201,9 +202,8 @@ final class ASRService {
         }
         send(command)
     }
-    /// Run a real silent inference pass. This is used after a long idle period
-    /// so memory paging and Metal graph restoration happen before recording.
-    func warmUp() { send(["cmd": "warmup"]) }
+
+    func setLearnedContext(_ text: String) { send(["cmd": "learned_context", "text": text]) }
     func stopUtterance() { send(["cmd": "stop"]) }
 
     /// Push edited vocabulary to the resident sidecar. The model is not reloaded,

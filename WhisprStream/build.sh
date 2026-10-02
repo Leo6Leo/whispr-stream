@@ -9,9 +9,10 @@ cd "$(dirname "$0")"
 PROJECT_ROOT="$(cd .. && pwd)"
 PYTHON="${PYTHON:-$PROJECT_ROOT/.venv/bin/python}"
 APP="${APP:-$PROJECT_ROOT/WhisprStream.app}"
-VERSION="${VERSION:-1.0.2}"
-BUILD_NUMBER="${BUILD_NUMBER:-5}"
+VERSION="${VERSION:-1.0.3}"
+BUILD_NUMBER="${BUILD_NUMBER:-6}"
 RELEASE="${RELEASE:-0}"
+ENABLE_MEETINGS="${ENABLE_MEETINGS:-0}"
 ENABLE_OPTIONAL_MODELS="${ENABLE_OPTIONAL_MODELS:-}"
 RUNTIME_URL="${RUNTIME_URL:-}"
 RUNTIME_SHA256="${RUNTIME_SHA256:-}"
@@ -38,6 +39,13 @@ if [ -z "$UPDATE_PUBLIC_KEY" ]; then
 fi
 BUNDLE_IDENTIFIER="${BUNDLE_IDENTIFIER:-dev.local.whisprstream}"
 SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
+
+# This branch ships dictation only. Reject an experimental Meetings build
+# before compiling or replacing an existing app bundle.
+if [ "$ENABLE_MEETINGS" != "0" ]; then
+    echo "error: Meeting Notes are unavailable in 1.0.3; ENABLE_MEETINGS must be 0" >&2
+    exit 1
+fi
 
 if [ -z "$ENABLE_OPTIONAL_MODELS" ]; then
     if [ "$RELEASE" = "1" ]; then
@@ -76,7 +84,12 @@ swift_build() {
             -Xswiftc -D -Xswiftc WHISPR_RELEASE
         )
     fi
-    swift build "$@" "${swift_defines[@]}"
+    # macOS Bash 3.2 rejects expanding an empty array under set -u.
+    if [ "${#swift_defines[@]}" -gt 0 ]; then
+        swift build "$@" "${swift_defines[@]}"
+    else
+        swift build "$@"
+    fi
 }
 
 if [ "$RELEASE" = "1" ]; then
@@ -226,6 +239,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleIconFile</key><string>WhisprStream.icns</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
+    <key>WhisprMeetingsEnabled</key><false/>
     <key>NSMicrophoneUsageDescription</key>
     <string>WhisprStream transcribes your speech on-device.</string>
 $DEVELOPMENT_PYTHON_PLIST
@@ -241,6 +255,8 @@ $DEVELOPMENT_PYTHON_PLIST
 </dict>
 </plist>
 PLIST
+
+bash "$PROJECT_ROOT/WhisprStream/validate-dictation-product.sh" "$APP"
 
 # Hardened Runtime requires the audio-input entitlement even without App
 # Sandbox. NSMicrophoneUsageDescription alone cannot enable the TCC prompt.
@@ -323,6 +339,7 @@ if [ "$RELEASE" = "1" ]; then
 fi
 
 echo "✓ built $APP"
+echo "  Meeting Notes: disabled"
 echo "  optional models: $OPTIONAL_MODELS_LABEL"
 if [ "$RELEASE" = "1" ]; then
     echo "  runtime: $RUNTIME_URL"

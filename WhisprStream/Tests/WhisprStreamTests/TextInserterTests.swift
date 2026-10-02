@@ -2,6 +2,30 @@ import XCTest
 @testable import WhisprStream
 
 final class TextInserterTests: XCTestCase {
+    func testEmptyTranscriptReleasesDeliveryActivity() {
+        var completions = 0
+        TextInserter.deliver("", insertAtCursor: true, copyToClipboard: true) {
+            completions += 1
+        }
+        XCTAssertEqual(completions, 1)
+    }
+
+    func testDisabledOutputReleasesDeliveryActivity() {
+        var completions = 0
+        TextInserter.deliver("Transcript", insertAtCursor: false, copyToClipboard: false) {
+            completions += 1
+        }
+        XCTAssertEqual(completions, 1)
+    }
+
+    func testEmptyInsertionReleasesDeliveryActivity() {
+        var completions = 0
+        TextInserter.deliver("Transcript", insertionText: "", insertAtCursor: true, copyToClipboard: false) {
+            completions += 1
+        }
+        XCTAssertEqual(completions, 1)
+    }
+
     func testLiteralShortcutDeliveryWaitsForCursorProbeToSettle() {
         var gate = TranscriptDeliveryGate()
         let shortcut = DeferredTranscriptDelivery(

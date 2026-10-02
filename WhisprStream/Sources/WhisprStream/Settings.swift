@@ -179,6 +179,19 @@ final class Settings: ObservableObject {
         didSet { defaults.set(copyToClipboard, forKey: Keys.copyToClipboard) }
     }
 
+    @Published var reviewUncertainWords: Bool {
+        didSet { defaults.set(reviewUncertainWords, forKey: Keys.reviewUncertainWords) }
+    }
+
+    @Published var learnFromCorrections: Bool {
+        didSet {
+            defaults.set(learnFromCorrections, forKey: Keys.learnFromCorrections)
+            onLearningChange?()
+        }
+    }
+
+    var onLearningChange: (() -> Void)?
+
     /// Keep sentence-ending punctuation from the speech model. When disabled,
     /// finished dictations end with a space instead so the next dictation does
     /// not run into the previous one.
@@ -412,7 +425,7 @@ final class Settings: ObservableObject {
     }
 
     /// True while the sidecar is reloading after a model switch. Drives the
-    /// Settings UI only; the HUD has its own `.loading` phase.
+    /// Settings UI only; dictation can capture audio during the reload.
     @Published var isReloadingModel = false
 
     /// Fired when a change requires the hotkey monitor to be rebound.
@@ -446,6 +459,8 @@ final class Settings: ObservableObject {
         static let activationMode = "activationMode"
         static let autoInsert = "autoInsert"
         static let copyToClipboard = "copyToClipboard"
+        static let reviewUncertainWords = "reviewUncertainWords.v1"
+        static let learnFromCorrections = "learnFromCorrections.v1"
         static let usePunctuation = "usePunctuation"
         static let contextAwareCapitalization = "contextAwareCapitalization"
         static let shortUtteranceLanguage = "shortUtteranceLanguage"
@@ -487,6 +502,8 @@ final class Settings: ObservableObject {
             ?? .hold
         autoInsert = defaults.object(forKey: Keys.autoInsert) as? Bool ?? true
         copyToClipboard = defaults.object(forKey: Keys.copyToClipboard) as? Bool ?? true
+        reviewUncertainWords = defaults.bool(forKey: Keys.reviewUncertainWords)
+        learnFromCorrections = defaults.bool(forKey: Keys.learnFromCorrections)
         usePunctuation = defaults.object(forKey: Keys.usePunctuation) as? Bool ?? true
         contextAwareCapitalization = defaults.object(
             forKey: Keys.contextAwareCapitalization

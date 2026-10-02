@@ -3,8 +3,6 @@ import SwiftUI
 /// What the HUD is showing. Drives every animation in `HUDView`.
 enum Phase: Equatable {
     case idle
-    case loading
-    case ready
     case listening
     case thinking
     case inserted
@@ -16,7 +14,7 @@ final class AppState: ObservableObject {
     static let dictationLimitSeconds: TimeInterval = 45
     static let dictationWarningLeadTimeSeconds: TimeInterval = 3
 
-    @Published var phase: Phase = .loading
+    @Published var phase: Phase = .idle
     @Published var committed: String = ""
     @Published var tail: String = ""
     @Published var level: CGFloat = 0        // 0...1 mic level, smoothed

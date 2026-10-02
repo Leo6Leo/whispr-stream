@@ -13,8 +13,8 @@ Speaks newline-delimited JSON on stdin/stdout so Swift can drive it:
 
 Final passes re-decode the complete utterance (RTF ~0.024 at 8-bit), preserving
 zh/en code-switching. Long live previews use a bounded recent window so they do
-not compete with another full-length pass. LocalAgreement-2 marks a preview
-prefix stable once two consecutive passes agree.
+not compete with another full-length pass. Token agreement protects settled
+words from a single conflicting pass while allowing confirmed corrections.
 """
 
 from __future__ import annotations
@@ -52,7 +52,6 @@ MAX_BUFFER_SEC = 50.0
 # silent. Speech-like audio always takes the authoritative final-decode path.
 MAX_SILENT_REUSE_TAIL = 2.0
 SILENCE_WINDOW_SEC = 0.02
-SILENCE_MAX_WINDOW_RMS = 0.02
 SILENCE_MAX_PEAK = 0.06
 
 # Decoding mere elapsed audio lets a vocabulary prompt hallucinate one of its
@@ -76,18 +75,11 @@ PREVIEW_MAX_AUDIO_SEC = 12.0
 WINDOWED_PREVIEW_COOLDOWN_RATIO = 0.75
 WINDOWED_PREVIEW_MAX_COOLDOWN_SEC = 0.4
 
-# Qwen occasionally translates only the opening of a short monolingual phrase,
-# for example spoken English "let me take a look" becoming
-# "让我 take a look". The model already emits a primary audio language before
-# its transcript. For a small mixed-script result whose dominant script agrees
-# with that detected language, retry once with the same language fixed. The
-# candidate is accepted only if it removes conflicting script without collapsing
-# or expanding the phrase. Longer and genuinely ambiguous mixed speech stays on
-# the normal multilingual path.
-LANGUAGE_REPAIR_MAX_SEC = 4.0
-LANGUAGE_REPAIR_MAX_UNITS = 8
 LATIN_WORD_RE = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)*")
 ASCII_WORD_RE = re.compile(r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*")
+# Keep Latin words whole and CJK characters individually alignable. Preserve
+# whitespace and punctuation verbatim when assembling the selected transcript.
+PREVIEW_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+(?:['’][A-Za-z0-9_]+)*|\s+|.", re.DOTALL)
 
 # Context is a strong generative hint rather than a constrained hotword list.
 # On acoustically unfamiliar one-word clips, Qwen can emit one context line
@@ -104,6 +96,41 @@ CONTEXT_SPLIT_MIN_TERM_LENGTH = 5
 class DecodeResult:
     text: str
     language: str | None
+    # A live preview has already passed the same vocabulary checks as a final.
+    # Failed/unresolved checks remain retryable when recording stops.
+    context_verified: bool = False
+
+
+@dataclass(frozen=True)
+class ReviewChoice:
+    prefix: str
+    preferred: str
+    alternative: str
+    suffix: str
+
+    @property
+    def text(self) -> str:
+        return self.prefix + self.preferred + self.suffix
+
+    def payload(self) -> dict:
+        return dict(prefix=self.prefix, preferred=self.preferred,
+                    alternative=self.alternative, suffix=self.suffix)
+
+    def for_transcript(self, text: str) -> ReviewChoice | None:
+        """Offer the held preview as an alternative, never as a final override."""
+        if text == self.text:
+            return self
+        if text == self.prefix + self.alternative + self.suffix:
+            return ReviewChoice(self.prefix, self.alternative, self.preferred, self.suffix)
+        return None
+
+
+@dataclass(frozen=True)
+class ReusablePreview:
+    result: DecodeResult
+    mode: str
+    unseen_samples: int
+    review: ReviewChoice | None = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +138,196 @@ class TextToken:
     text: str
     start: int
     end: int
+
+
+class PreviewStabilizer:
+    """Require two audio observations to revise words already seen twice.
+
+    Agreement is token-local, so appending speech does not prevent an earlier
+    word from settling. Only raw decoder observations count as evidence: a
+    held display value cannot vote for itself. This is a stability heuristic,
+    not a calibrated confidence score or a permanent transcript lock.
+    """
+
+    def __init__(self) -> None:
+        self.tokens: list[str] = []
+        self.support: list[int] = []
+        self.raw: list[str] = []
+        self.raw_support: list[int] = []
+        self.start = 0
+        self.end = -1
+        self.revision = -1
+        self.review: ReviewChoice | None = None
+
+    @staticmethod
+    def _lexical(token: str) -> bool:
+        return any(char.isalnum() for char in token)
+
+    @staticmethod
+    def _align(old: list[str], new: list[str], from_end: bool = False):
+        if not from_end:
+            edits = SequenceMatcher(None, old, new, autojunk=False).get_opcodes()
+        else:
+            # Prefer recent anchors when a full final restores earlier audio.
+            reverse = SequenceMatcher(None, old[::-1], new[::-1], autojunk=False)
+            edits = [
+                (tag, len(old) - i2, len(old) - i1, len(new) - j2, len(new) - j1)
+                for tag, i1, i2, j1, j2 in reversed(reverse.get_opcodes())
+            ]
+        aligned = []
+        for tag, i1, i2, j1, j2 in edits:
+            old_words = [i for i in range(i1, i2) if PreviewStabilizer._lexical(old[i])]
+            new_words = [j for j in range(j1, j2) if PreviewStabilizer._lexical(new[j])]
+            nearby_words = bool(old_words) and len(new_words) >= len(old_words) and all(
+                SequenceMatcher(None, old[i], new[j], autojunk=False).ratio() >= 0.6
+                or (len(old[i]) == len(new[j]) == 1
+                    and not old[i].isascii() and not new[j].isascii())
+                for i, j in zip(old_words, new_words)
+            )
+            if (
+                tag == "replace" and not any(map(PreviewStabilizer._lexical, old[i2:]))
+                and 0 < len(old_words) <= 2 and nearby_words
+            ):
+                # "Use Codex." -> "Use Codec, then test" is a word revision
+                # plus an appended tail, not one large replacement. Separate
+                # them so protecting the name cannot swallow the new speech.
+                old_end = old_words[-1] + 1
+                new_end = new_words[len(old_words) - 1] + 1
+                aligned.append((tag, i1, old_end, j1, new_end))
+                aligned.append(("replace", old_end, i2, new_end, j2))
+            else:
+                aligned.append((tag, i1, i2, j1, j2))
+        return aligned
+
+    def update(self, text: str, start: int, end: int, revision: int) -> str:
+        self.review = None
+        incoming = PREVIEW_TOKEN_RE.findall(text)
+        scope_changed = start != self.start
+        edits = self._align(self.tokens, incoming, from_end=scope_changed)
+        # Changed vocabulary, a new recording, or non-overlapping windows have
+        # no comparable history. Do not splice unrelated transcripts together.
+        reset = revision != self.revision or end < self.end or start >= self.end
+        if scope_changed:
+            matched = sum(
+                self._lexical(token)
+                for tag, i1, i2, _, _ in edits if tag == "equal"
+                for token in self.tokens[i1:i2]
+            )
+            shorter = min(
+                sum(map(self._lexical, self.tokens)),
+                sum(map(self._lexical, incoming)),
+            )
+            reset = reset or matched < max(2, shorter / 2)
+        if reset:
+            self.tokens = incoming
+            self.support = [1] * len(incoming)
+            self.raw = incoming
+            self.raw_support = self.support.copy()
+            self.start, self.end, self.revision = start, end, revision
+            return text
+
+        new_observation = end > self.end
+        raw_support = [1] * len(incoming)
+        if new_observation:
+            for tag, i1, i2, j1, j2 in self._align(
+                self.raw, incoming, from_end=scope_changed
+            ):
+                if tag == "equal":
+                    raw_support[j1:j2] = [
+                        min(2, count + 1) for count in self.raw_support[i1:i2]
+                    ]
+
+        # Align the previous *raw* pass to today's display, rather than keeping
+        # position keys which become stale when an earlier edit is accepted.
+        previous_edits = {
+            (i1, i2, tuple(self.raw[j1:j2]))
+            for tag, i1, i2, j1, j2 in self._align(self.tokens, self.raw)
+            if tag != "equal"
+        }
+        removed = {
+            token for tag, i1, i2, _, _ in edits if tag != "equal"
+            for token in self.tokens[i1:i2] if self._lexical(token)
+        }
+        added = {
+            token for tag, _, _, j1, j2 in edits if tag != "equal"
+            for token in incoming[j1:j2] if self._lexical(token)
+        }
+        if removed & added:
+            # Reordering/repeated anchors are not independent local edits.
+            # Keeping a deletion while accepting its insertion would duplicate
+            # words ("red blue" -> "blue red blue"). Prefer the raw candidate
+            # when the alignment cannot safely isolate a word substitution.
+            self.tokens, self.support = incoming, raw_support
+            self.raw, self.raw_support = incoming, raw_support
+            self.start, self.end, self.revision = start, end, revision
+            return text
+        selected: list[str] = []
+        support: list[int] = []
+        disputes: list[tuple[int, str, str]] = []
+        for tag, i1, i2, j1, j2 in edits:
+            replacement = incoming[j1:j2]
+            if tag == "equal":
+                selected.extend(replacement)
+                support.extend(
+                    max(old, new)
+                    for old, new in zip(self.support[i1:i2], raw_support[j1:j2])
+                )
+                continue
+
+            protected = any(
+                count >= 2 and self._lexical(token)
+                for token, count in zip(self.tokens[i1:i2], self.support[i1:i2])
+            )
+            if tag == "insert":
+                # Appended speech is always immediate. Interior insertions
+                # (including negation) need confirmation between settled words.
+                left = next((i for i in range(i1 - 1, -1, -1)
+                             if self._lexical(self.tokens[i])), None)
+                right = next((i for i in range(i1, len(self.tokens))
+                              if self._lexical(self.tokens[i])), None)
+                protected = (
+                    left is not None and right is not None
+                    and self.support[left] >= 2 and self.support[right] >= 2
+                    and any(map(self._lexical, replacement))
+                )
+            # The left edge changes when old audio falls out of the window or
+            # the full final restores it. Its edits are not linguistic votes.
+            if scope_changed and i1 == 0:
+                protected = False
+            confirmed = new_observation and (
+                i1, i2, tuple(replacement)
+            ) in previous_edits
+            if protected and not confirmed:
+                disputes.append((sum(map(len, selected)),
+                                 "".join(self.tokens[i1:i2]), "".join(replacement)))
+                selected.extend(self.tokens[i1:i2])
+                support.extend(self.support[i1:i2])
+            else:
+                selected.extend(replacement)
+                support.extend(raw_support[j1:j2])
+
+        self.tokens, self.support = selected, support
+        if new_observation:
+            self.raw, self.raw_support = incoming, raw_support
+        self.start, self.end, self.revision = start, end, revision
+        selected_text = "".join(selected)
+        if len(disputes) == 1:
+            offset, preferred, alternative = disputes[0]
+            # Ask only about one bounded lexical substitution. Whole-sentence
+            # rewrites, punctuation, omissions, and ambiguous alignments are
+            # not useful word choices and should not interrupt dictation.
+            if (
+                0 < len(preferred.strip()) <= 48 and 0 < len(alternative.strip()) <= 48
+                and preferred.casefold() != alternative.casefold()
+                and all(any(c.isalnum() for c in term) for term in (preferred, alternative))
+                and all(len(term.split()) <= 3 and "\n" not in term
+                        for term in (preferred, alternative))
+            ):
+                self.review = ReviewChoice(
+                    selected_text[:offset], preferred, alternative,
+                    selected_text[offset + len(preferred):],
+                )
+        return selected_text
 
 
 def emit(obj: dict) -> None:
@@ -127,30 +344,13 @@ def commonprefix(a: str, b: str) -> str:
 
 
 def normalize_detected_language(value: object) -> str | None:
-    """Return the canonical language names used by short-phrase repair."""
+    """Return canonical language names for decoder metadata."""
     normalized = str(value or "").strip().casefold().replace("_", "-")
     if normalized in {"english", "en"} or normalized.startswith("en-"):
         return "English"
     if normalized in {"chinese", "zh"} or normalized.startswith("zh-"):
         return "Chinese"
     return str(value).strip() if value else None
-
-
-def is_han_character(character: str) -> bool:
-    value = ord(character)
-    return (
-        0x3400 <= value <= 0x4DBF
-        or 0x4E00 <= value <= 0x9FFF
-        or 0xF900 <= value <= 0xFAFF
-        or 0x20000 <= value <= 0x3134F
-    )
-
-
-def transcript_script_units(text: str) -> tuple[int, int]:
-    """Return (Han characters, Latin words) for a bilingual transcript."""
-    han_characters = sum(1 for character in text if is_han_character(character))
-    latin_words = len(LATIN_WORD_RE.findall(text))
-    return han_characters, latin_words
 
 
 def normalized_context_text(text: str) -> str:
@@ -501,65 +701,6 @@ def canonicalize_from_preview_context(
     return canonical
 
 
-def language_repair_target(
-    text: str,
-    detected_language: str | None,
-    audio_seconds: float,
-) -> str | None:
-    """Choose a safe primary-language retry for a short mixed-script result.
-
-    Detection and script dominance must independently agree. A mismatch is
-    treated as intentional code-switching and left untouched.
-    """
-    if audio_seconds > LANGUAGE_REPAIR_MAX_SEC:
-        return None
-
-    language = normalize_detected_language(detected_language)
-    if language not in {"Chinese", "English"}:
-        return None
-
-    han_characters, latin_words = transcript_script_units(text)
-    total_units = han_characters + latin_words
-    if (
-        han_characters == 0
-        or latin_words == 0
-        or total_units > LANGUAGE_REPAIR_MAX_UNITS
-        or han_characters == latin_words
-    ):
-        return None
-
-    dominant = "Chinese" if han_characters > latin_words else "English"
-    return language if language == dominant else None
-
-
-def is_better_language_repair(
-    original: str,
-    candidate: str,
-    target_language: str,
-) -> bool:
-    """Accept only a same-sized candidate with less conflicting script."""
-    if not candidate.strip() or candidate.strip() == original.strip():
-        return False
-
-    original_han, original_latin = transcript_script_units(original)
-    candidate_han, candidate_latin = transcript_script_units(candidate)
-    original_units = original_han + original_latin
-    candidate_units = candidate_han + candidate_latin
-    if original_units == 0:
-        return False
-
-    minimum_units = max(1, (original_units + 1) // 2)
-    maximum_units = original_units * 2 + 2
-    if not minimum_units <= candidate_units <= maximum_units:
-        return False
-
-    if target_language == "English":
-        return candidate_latin > 0 and candidate_han < original_han
-    if target_language == "Chinese":
-        return candidate_han > 0 and candidate_latin < original_latin
-    return False
-
-
 def is_confident_silence(audio: np.ndarray) -> bool:
     """Return True only when every short window looks safely non-speech."""
     if len(audio) == 0:
@@ -568,10 +709,18 @@ def is_confident_silence(audio: np.ndarray) -> bool:
         return False
 
     window = max(1, int(SILENCE_WINDOW_SEC * SAMPLE_RATE))
-    for start in range(0, len(audio), window):
-        frame = audio[start:start + window]
-        rms = float(np.sqrt(np.mean(frame * frame)))
-        if rms > SILENCE_MAX_WINDOW_RMS:
+    complete_samples = len(audio) // window * window
+    frames = audio[:complete_samples].reshape(-1, window)
+    rms = np.sqrt(np.mean(frames * frames, axis=1))
+    # Use the same threshold, inclusive comparison, and array arithmetic as
+    # has_speech. A speech-level frame can never also be confident silence.
+    # Unlike the startup gate, even one such frame may be a trailing phoneme.
+    if np.any(rms >= SPEECH_MIN_WINDOW_RMS):
+        return False
+    tail = audio[complete_samples:]
+    if len(tail):
+        tail_rms = np.sqrt(np.mean(tail * tail, keepdims=True))
+        if np.any(tail_rms >= SPEECH_MIN_WINDOW_RMS):
             return False
     return True
 
@@ -654,6 +803,7 @@ class Server:
         context: str,
         short_utterance_language: str = "",
         engine: str = "qwen3",
+        learned_context: str = "",
     ):
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from asr_engine import build_session
@@ -663,6 +813,7 @@ class Server:
 
         self.lock = threading.Lock()
         self.context = context
+        self.learned_context = learned_context
         self.short_utterance_language = normalize_short_utterance_language(
             short_utterance_language
         )
@@ -672,6 +823,7 @@ class Server:
         self.active = False
         self.committed = ""
         self._prev = ""
+        self._stabilizer = PreviewStabilizer()
         self._last_preview_text: str | None = None
         self._last_preview_len = 0
         self._last_preview_start = 0
@@ -679,26 +831,14 @@ class Server:
         self._last_preview_language: str | None = None
         self._last_preview_detected_language: str | None = None
         self._last_preview_stable = False
+        self._last_preview_context_verified = False
+        self._last_preview_review: ReviewChoice | None = None
         self._last_context_preview_text: str | None = None
         self._last_context_preview_len = 0
         self._last_context_preview_start = 0
         self._last_context_preview_revision = -1
         self._thread: threading.Thread | None = None
         self._preview_stop = threading.Event()
-
-    def warmup(self) -> None:
-        """Prove the resident model is inference-ready after a long idle.
-
-        Loading weights is not enough: macOS may page model memory out and MLX
-        may need to restore its execution resources after inactivity. A silent
-        pass pays that cost before Swift permits the next recording to begin.
-        """
-        started = time.perf_counter()
-        self.session.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32))
-        emit({
-            "type": "warmed",
-            "ms": int((time.perf_counter() - started) * 1000),
-        })
 
     # -- transcription -------------------------------------------------
     def _language_for_audio(self, audio: np.ndarray) -> str | None:
@@ -711,8 +851,13 @@ class Server:
         audio: np.ndarray,
         context: str,
         language: str | None = None,
+        use_learned_context: bool = True,
     ) -> DecodeResult:
-        kw = {"context": context} if context else {}
+        # Learned terms are soft decoder hints only. Keep them separate from
+        # explicit vocabulary spelling canonicalization and unbiased checks.
+        learned = getattr(self, "learned_context", "") if use_learned_context else ""
+        prompt = "\n".join(part for part in (context, learned) if part)
+        kw = {"context": prompt} if prompt else {}
         if language:
             kw["language"] = language
         raw_result = self.session.transcribe(audio, **kw)
@@ -739,13 +884,17 @@ class Server:
     ) -> DecodeResult:
         """Decode and verify vocabulary words before showing a live preview."""
         result = self._decode_result(audio, context)
-        result, _status = self._verify_context_result(
+        result, status = self._verify_context_result(
             audio,
             context,
             result,
             force_automatic_language=True,
         )
-        return result
+        return DecodeResult(
+            result.text,
+            result.language,
+            context_verified=status not in {"context-check-error", "context-check-unresolved"},
+        )
 
     def _decode_preview(self, audio: np.ndarray, context: str) -> str:
         """Decode live text without treating a sentence start as one word."""
@@ -762,26 +911,6 @@ class Server:
     def _decode_final(self, audio: np.ndarray, context: str) -> str:
         """Apply short-utterance guidance only after clip length is known."""
         return self._decode_final_result(audio, context).text
-
-    def _repair_short_language(
-        self,
-        audio: np.ndarray,
-        context: str,
-        result: DecodeResult,
-    ) -> tuple[DecodeResult, str | None]:
-        """Retry a suspicious short mixed result in its detected language."""
-        target = language_repair_target(
-            result.text,
-            result.language,
-            len(audio) / SAMPLE_RATE,
-        )
-        if target is None:
-            return result, None
-
-        candidate = self._decode_result(audio, context, target)
-        if is_better_language_repair(result.text, candidate.text, target):
-            return candidate, target
-        return result, None
 
     def _verify_context_result(
         self,
@@ -823,6 +952,7 @@ class Server:
                 audio,
                 "",
                 None if force_automatic_language else self._language_for_audio(audio),
+                use_learned_context=False,
             )
         except Exception as error:
             print(
@@ -872,8 +1002,8 @@ class Server:
         self,
         audio: np.ndarray,
         context_revision: int,
-    ) -> tuple[str, str, int, str | None] | None:
-        """Return text, mode, unseen samples, and detected language."""
+    ) -> ReusablePreview | None:
+        """Snapshot a full preview only when its audio and context still apply."""
         with self.lock:
             text = self._last_preview_text
             decoded_len = self._last_preview_len
@@ -886,6 +1016,8 @@ class Server:
                 None,
             )
             stable = self._last_preview_stable
+            context_verified = getattr(self, "_last_preview_context_verified", False)
+            review = getattr(self, "_last_preview_review", None)
 
         if text is None or decoded_revision != context_revision:
             return None
@@ -902,15 +1034,16 @@ class Server:
             return None
 
         unseen = len(audio) - decoded_len
+        result = DecodeResult(text, detected_language, context_verified)
         if unseen == 0:
             # Same samples + same context produces the same deterministic final
             # result, so a second pass would be pure duplicate work.
-            return text, "reuse-exact", 0, detected_language
+            return ReusablePreview(result, "reuse-exact", 0, review)
 
         max_tail = int(MAX_SILENT_REUSE_TAIL * SAMPLE_RATE)
         tail = audio[decoded_len:]
         if unseen <= max_tail and stable and is_confident_silence(tail):
-            return text, "reuse-silent-tail", unseen, detected_language
+            return ReusablePreview(result, "reuse-silent-tail", unseen, review)
         return None
 
     @staticmethod
@@ -923,8 +1056,9 @@ class Server:
         wait_ms: int,
         unseen_samples: int = 0,
         language: str | None = None,
+        review: ReviewChoice | None = None,
     ) -> None:
-        emit({
+        event = {
             "type": "final",
             "text": text,
             "secs": round(secs, 2),
@@ -934,7 +1068,10 @@ class Server:
             "mode": mode,
             "unseen_ms": int(unseen_samples / SAMPLE_RATE * 1000),
             "language": language or "unknown",
-        })
+        }
+        if review is not None and review.text == text:
+            event["review"] = review.payload()
+        emit(event)
 
     def _join_preview_thread(self, timeout: float | None = 5.0) -> bool:
         """Wait for preview inference without losing a still-live thread."""
@@ -963,26 +1100,47 @@ class Server:
                 # Context terms are strong decoder hints, so never ask the
                 # model to interpret audio that contains only room tone.
                 continue
+            reusable = self._reusable_preview(full_audio, context_revision)
+            if (
+                reusable is not None
+                and reusable.result.context_verified
+                and reusable.mode == "reuse-silent-tail"
+            ):
+                # Added silence is not new linguistic evidence. Re-decoding
+                # it can flip a settled word just before the key is released.
+                if self._preview_stop.wait(timeout=POLL_INTERVAL):
+                    break
+                continue
             audio, preview_start = preview_audio(full_audio)
             try:
                 decode_started = time.perf_counter()
                 result = self._decode_preview_result(audio, context)
-                text = result.text
-                decode_seconds = time.perf_counter() - decode_started
-                stable = text == self._prev
-                agreed = commonprefix(text, self._prev)
-                if preview_start == 0:
-                    if len(agreed) > len(self.committed):
-                        self.committed = agreed
+                if result.context_verified:
+                    text = self._stabilizer.update(
+                        result.text, preview_start, full_len, context_revision
+                    )
                 else:
-                    # The rolling window moves forward, so its settled prefix
-                    # may legitimately shrink. The HUD already truncates from
-                    # the head and therefore naturally presents this recent
-                    # full-context window as the visible tail of the utterance.
-                    self.committed = agreed
+                    # Failed vocabulary checks must not earn protection or
+                    # carry earlier protection through an unverified result.
+                    self._stabilizer = PreviewStabilizer()
+                    text = result.text
+                decode_seconds = time.perf_counter() - decode_started
+                previous = (
+                    self._prev
+                    if context_revision == self._last_preview_context_revision
+                    else ""
+                )
+                stable = (
+                    context_revision == self._last_preview_context_revision
+                    and result.text == self._last_preview_text
+                )
+                # Stabilization is presentation-only. Cache the verified raw
+                # decode so final reuse cannot lose a negation, rewrite, or
+                # new tail that the display is still waiting to confirm.
+                self.committed = commonprefix(text, previous)
                 self._prev = text
                 with self.lock:
-                    self._last_preview_text = text
+                    self._last_preview_text = result.text
                     self._last_preview_len = full_len
                     self._last_preview_start = preview_start
                     self._last_preview_context_revision = context_revision
@@ -992,8 +1150,13 @@ class Server:
                     self._last_preview_language = None
                     self._last_preview_detected_language = result.language
                     self._last_preview_stable = stable
-                    if transcript_contains_context_word(text, context):
-                        self._last_context_preview_text = text
+                    self._last_preview_context_verified = result.context_verified
+                    self._last_preview_review = (
+                        self._stabilizer.review.for_transcript(result.text)
+                        if self._stabilizer.review else None
+                    )
+                    if transcript_contains_context_word(result.text, context):
+                        self._last_context_preview_text = result.text
                         self._last_context_preview_len = full_len
                         self._last_context_preview_start = preview_start
                         self._last_context_preview_revision = context_revision
@@ -1038,12 +1201,15 @@ class Server:
             self._last_preview_language = None
             self._last_preview_detected_language = None
             self._last_preview_stable = False
+            self._last_preview_context_verified = False
+            self._last_preview_review = None
             self._last_context_preview_text = None
             self._last_context_preview_len = 0
             self._last_context_preview_start = 0
             self._last_context_preview_revision = -1
         self.committed = ""
         self._prev = ""
+        self._stabilizer = PreviewStabilizer()
         requested_language = normalize_short_utterance_language(
             short_utterance_language
         )
@@ -1077,6 +1243,12 @@ class Server:
                 self.context = text
                 self._context_revision += 1
 
+    def set_learned_context(self, text: str) -> None:
+        with self.lock:
+            if text != self.learned_context:
+                self.learned_context = text
+                self._context_revision += 1
+
     def stop(self) -> None:
         stop_started = time.perf_counter()
         self.active = False
@@ -1101,31 +1273,20 @@ class Server:
         # whole utterance (or differs only by a short stable silence tail). Emit
         # before waiting for a newer, now-unneeded preview that may be in flight.
         reusable = self._reusable_preview(audio, context_revision)
-        preview_context = self._recent_context_preview(audio, context_revision)
-        if reusable is not None:
-            text, mode, unseen, detected_language = reusable
-            repair_target = language_repair_target(
-                text,
-                detected_language,
+        if reusable is not None and reusable.result.context_verified:
+            self._emit_final(
+                reusable.result.text,
                 secs,
+                0,
+                stop_started,
+                reusable.mode,
+                0,
+                reusable.unseen_samples,
+                reusable.result.language,
+                review=reusable.review,
             )
-            if (
-                repair_target is None
-                and not transcript_contains_context_word(text, context)
-                and preview_context is None
-            ):
-                self._emit_final(
-                    text,
-                    secs,
-                    0,
-                    stop_started,
-                    mode,
-                    0,
-                    unseen,
-                    detected_language,
-                )
-                self._join_preview_thread()
-                return
+            self._join_preview_thread()
+            return
 
         wait_started = time.perf_counter()
         if not self._join_preview_thread():
@@ -1138,76 +1299,66 @@ class Server:
         preview_context = self._recent_context_preview(audio, context_revision)
         reusable = self._reusable_preview(audio, context_revision)
         if reusable is not None:
-            text, mode, unseen, detected_language = reusable
-            result = DecodeResult(text, detected_language)
-            repair_target = language_repair_target(text, detected_language, secs)
+            result = reusable.result
             inference_started = time.perf_counter()
+            context_check = None
             try:
-                repaired, accepted_target = self._repair_short_language(
-                    audio,
-                    context,
-                    result,
-                )
-                repaired, context_check = self._verify_context_result(
-                    audio,
-                    context,
-                    repaired,
-                    preview_context,
-                )
+                if not result.context_verified:
+                    result, context_check = self._verify_context_result(
+                        audio,
+                        context,
+                        result,
+                        preview_context,
+                    )
             except Exception as e:
                 emit({"type": "error", "message": f"final: {e}"})
                 return
             inference_ms = int((time.perf_counter() - inference_started) * 1000)
-            final_mode = mode
-            if accepted_target is not None:
-                final_mode += f"-language-repair-{accepted_target.casefold()}"
-            elif repair_target is not None:
-                final_mode += "-language-repair-rejected"
+            final_mode = reusable.mode
             if context_check is not None:
                 final_mode += f"-{context_check}"
             self._emit_final(
-                repaired.text,
+                result.text,
                 secs,
                 inference_ms,
                 stop_started,
                 final_mode,
                 wait_ms,
-                unseen,
-                repaired.language,
+                reusable.unseen_samples,
+                result.language,
+                review=reusable.review if result.context_verified else None,
             )
             return
 
         inference_started = time.perf_counter()
         try:
             result = self._decode_final_result(audio, context)
-            repair_target = None
-            accepted_target = None
-            if self._language_for_audio(audio) is None:
-                repair_target = language_repair_target(
-                    result.text,
-                    result.language,
-                    secs,
-                )
-                result, accepted_target = self._repair_short_language(
-                    audio,
-                    context,
-                    result,
-                )
+            # Automatic language detection must preserve intentional mixed
+            # speech. Script counts cannot distinguish it from a translation;
+            # only the user's explicit short-clip preference forces a language.
             result, context_check = self._verify_context_result(
                 audio,
                 context,
                 result,
                 preview_context,
             )
+            review = None
+            if (
+                self._language_for_audio(audio) is None
+                and context_check not in {"context-check-error", "context-check-unresolved"}
+            ):
+                # The complete decode is authoritative. The stabilizer may
+                # suggest a word choice, but must never veto its content.
+                self._stabilizer.update(
+                    result.text, 0, len(audio), context_revision
+                )
+                if self._stabilizer.review:
+                    review = self._stabilizer.review.for_transcript(result.text)
         except Exception as e:
             emit({"type": "error", "message": f"final: {e}"})
             return
         inference_ms = int((time.perf_counter() - inference_started) * 1000)
         mode = "fresh-final"
-        if accepted_target is not None:
-            mode += f"-language-repair-{accepted_target.casefold()}"
-        elif repair_target is not None:
-            mode += "-language-repair-rejected"
         if context_check is not None:
             mode += f"-{context_check}"
         self._emit_final(
@@ -1218,6 +1369,7 @@ class Server:
             mode,
             wait_ms,
             language=result.language,
+            review=review,
         )
 
 
@@ -1238,6 +1390,7 @@ def main() -> int:
             context,
             short_utterance_language,
             engine=engine,
+            learned_context=os.environ.get("WHISPR_LEARNED_CONTEXT", ""),
         )
     except Exception as e:
         emit({"type": "error", "message": f"load: {e}"})
@@ -1255,14 +1408,14 @@ def main() -> int:
         try:
             if cmd == "start":
                 server.start(msg.get("short_utterance_language"))
-            elif cmd == "warmup":
-                server.warmup()
             elif cmd == "audio":
                 server.audio(msg["pcm"])
             elif cmd == "stop":
                 server.stop()
             elif cmd == "context":
                 server.set_context(msg.get("text", ""))
+            elif cmd == "learned_context":
+                server.set_learned_context(msg.get("text", ""))
             elif cmd == "quit":
                 break
         except Exception as e:

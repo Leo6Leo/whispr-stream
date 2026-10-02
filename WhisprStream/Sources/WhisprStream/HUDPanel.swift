@@ -19,6 +19,9 @@ final class HUDPanel: NSPanel, NSWindowDelegate {
     private var isApplyingPosition = false
     private var dragStartMouse: NSPoint?
     private var dragStartOrigin: NSPoint?
+    private var presentation = HUDPresentationState()
+
+    var presentationGeneration: UInt64 { presentation.generation }
 
     init(state: AppState) {
         super.init(
@@ -150,8 +153,10 @@ final class HUDPanel: NSPanel, NSWindowDelegate {
     }
 
     func present() {
+        let startsHidden = presentation.phase == .hidden
+        presentation.present()
         reposition()
-        alphaValue = 0
+        if startsHidden { alphaValue = 0 }
         orderFrontRegardless()
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.14
@@ -163,12 +168,14 @@ final class HUDPanel: NSPanel, NSWindowDelegate {
     /// Fades out, then runs `completion` — callers must not reset state before
     /// it fires or the HUD visibly reverts mid-fade.
     func dismiss(completion: (() -> Void)? = nil) {
+        let generation = presentation.beginDismiss()
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.16
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
             animator().alphaValue = 0
         } completionHandler: { [weak self] in
-            self?.orderOut(nil)
+            guard let self, self.presentation.completeDismiss(generation) else { return }
+            self.orderOut(nil)
             completion?()
         }
     }

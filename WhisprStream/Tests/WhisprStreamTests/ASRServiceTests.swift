@@ -3,52 +3,6 @@ import XCTest
 @testable import WhisprStream
 
 final class ASRServiceTests: XCTestCase {
-    func testWarmupCommandWaitsForSidecarAcknowledgement() throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("WhisprStream-ASRServiceTests-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-
-        let script = directory.appendingPathComponent("warmup_sidecar.py")
-        try """
-        import json
-        import sys
-
-        print(json.dumps({"type": "ready", "ms": 1}), flush=True)
-        for line in sys.stdin:
-            if json.loads(line).get("cmd") == "warmup":
-                print(json.dumps({"type": "warmed", "ms": 37}), flush=True)
-        """.write(to: script, atomically: true, encoding: .utf8)
-
-        let service = ASRService(
-            python: URL(fileURLWithPath: "/usr/bin/python3"),
-            script: script,
-            model: "unused",
-            bits: 8,
-            context: "",
-            shortUtteranceLanguage: .english
-        )
-        let ready = expectation(description: "sidecar becomes ready")
-        let warmed = expectation(description: "warmup completes")
-        service.onEvent = { event in
-            switch event {
-            case .ready:
-                ready.fulfill()
-            case let .warmed(ms):
-                XCTAssertEqual(ms, 37)
-                warmed.fulfill()
-            default:
-                break
-            }
-        }
-        try service.start()
-        defer { service.shutdown() }
-
-        wait(for: [ready], timeout: 2)
-        service.warmUp()
-        wait(for: [warmed], timeout: 2)
-    }
-
     func testSelectedEngineIsPassedToSidecar() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("WhisprStream-ASRServiceTests-\(UUID().uuidString)")
@@ -86,7 +40,7 @@ final class ASRServiceTests: XCTestCase {
         wait(for: [received], timeout: 2)
     }
 
-    func testAudioWritesDoNotBlockWhileSidecarIsStillStarting() throws {
+    func testDictationDuringStartupPreservesAudioAndCommandOrderWithoutBlocking() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("WhisprStream-ASRServiceTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -94,15 +48,33 @@ final class ASRServiceTests: XCTestCase {
 
         let script = directory.appendingPathComponent("delayed_sidecar.py")
         try """
+        import base64
         import json
         import sys
         import time
 
         time.sleep(1.5)
         print(json.dumps({"type": "ready", "ms": 1500}), flush=True)
+        started = False
+        chunks = 0
         for line in sys.stdin:
-            if json.loads(line).get("cmd") == "quit":
+            message = json.loads(line)
+            command = message.get("cmd")
+            if command == "start":
+                assert not started and chunks == 0
+                assert message["short_utterance_language"] == "English"
+                started = True
+            elif command == "audio":
+                assert started
+                assert base64.b64decode(message["pcm"]) == bytes([chunks]) * 8192
+                chunks += 1
+            elif command == "stop":
+                assert started and chunks == 16
+                print(json.dumps({"type": "final", "text": "all audio received in order"}), flush=True)
+            elif command == "quit":
                 break
+            else:
+                raise AssertionError(command)
         """.write(to: script, atomically: true, encoding: .utf8)
 
         let service = ASRService(
@@ -114,8 +86,19 @@ final class ASRServiceTests: XCTestCase {
             shortUtteranceLanguage: .english
         )
         let ready = expectation(description: "delayed sidecar becomes ready")
+        let final = expectation(description: "queued dictation completes after startup")
         service.onEvent = { event in
-            if case .ready = event { ready.fulfill() }
+            switch event {
+            case .ready:
+                ready.fulfill()
+            case let .final(text, _, _, _):
+                XCTAssertEqual(text, "all audio received in order")
+                final.fulfill()
+            case let .error(message), let .terminated(message):
+                XCTFail(message)
+            default:
+                break
+            }
         }
         try service.start()
         defer { service.shutdown() }
@@ -123,13 +106,16 @@ final class ASRServiceTests: XCTestCase {
         // This is larger than a typical OS pipe buffer. Synchronous writes
         // block until the delayed process starts reading; queued writes return
         // without stalling either the audio callback or the app's main thread.
-        let chunk = Data(repeating: 0, count: 8_192)
         let startedAt = ProcessInfo.processInfo.systemUptime
-        for _ in 0..<16 { service.sendAudio(chunk) }
+        service.beginUtterance(shortUtteranceLanguage: "English")
+        for index in 0..<16 {
+            service.sendAudio(Data(repeating: UInt8(index), count: 8_192))
+        }
+        service.stopUtterance()
         let enqueueSeconds = ProcessInfo.processInfo.systemUptime - startedAt
 
         XCTAssertLessThan(enqueueSeconds, 0.75)
-        wait(for: [ready], timeout: 3)
+        wait(for: [ready, final], timeout: 4, enforceOrder: true)
     }
 
     func testUnexpectedSidecarExitHasDistinctLifecycleEvent() throws {

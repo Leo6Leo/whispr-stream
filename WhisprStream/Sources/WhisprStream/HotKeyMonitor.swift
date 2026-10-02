@@ -17,7 +17,7 @@ final class HotKeyMonitor {
 
     /// Begin capturing. Return true only when recording actually started. The
     /// monitor commits its active state after this callback succeeds, so a
-    /// rejected warm-up or permission attempt can be retried on the next press.
+    /// rejected startup or permission attempt can be retried on the next press.
     var onStart: (() -> Bool)?
     /// Stop capturing and transcribe.
     var onStop: (() -> Void)?

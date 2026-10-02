@@ -1,0 +1,133 @@
+name: Sync Homebrew Cask
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Stable release tag to publish, for example v1.0.2
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-homebrew-cask
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.event_name == 'workflow_dispatch' || (!github.event.release.draft && !github.event.release.prerelease)
+    runs-on: ubuntu-latest
+    env:
+      ASSET_NAME: WhisprStream-macos-arm64.zip
+      CASK_PATH: Casks/whispr-stream.rb
+      TAP_REPOSITORY: Leo6Leo/homebrew-tap
+    steps:
+      - name: Check out the default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Resolve and validate the release
+        id: release
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$RELEASE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "error: expected a stable tag such as v1.0.2, got '$RELEASE_TAG'" >&2
+            exit 1
+          fi
+          version="${BASH_REMATCH[1]}"
+
+          release_json="$(gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json isDraft,isPrerelease)"
+          if [[ "$(jq -r .isDraft <<<"$release_json")" != "false" ]] \
+            || [[ "$(jq -r .isPrerelease <<<"$release_json")" != "false" ]]; then
+            echo "error: Homebrew publishing requires a published stable release" >&2
+            exit 1
+          fi
+
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Download the app archive and calculate its checksum
+        id: archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          archive_dir="$RUNNER_TEMP/homebrew-release"
+          mkdir -p "$archive_dir"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$ASSET_NAME" \
+            --dir "$archive_dir"
+
+          archive="$archive_dir/$ASSET_NAME"
+          test -f "$archive"
+          unzip -Z1 "$archive" | grep -qx 'WhisprStream.app/'
+          echo "sha256=$(sha256sum "$archive" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Update the source Cask
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          SHA256: ${{ steps.archive.outputs.sha256 }}
+        run: |
+          ruby - "$CASK_PATH" "$VERSION" "$SHA256" <<'RUBY'
+          path, version, sha256 = ARGV
+          source = File.read(path)
+
+          version_count = source.scan(/^  version ".*"$/).length
+          sha_count = source.scan(/^  sha256 ".*"$/).length
+          abort "expected exactly one version and sha256 line" unless version_count == 1 && sha_count == 1
+
+          source.sub!(/^  version ".*"$/, %(  version "#{version}"))
+          source.sub!(/^  sha256 ".*"$/, %(  sha256 "#{sha256}"))
+          File.write(path, source)
+          RUBY
+
+          ruby -c "$CASK_PATH"
+
+      - name: Commit the source Cask
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet -- "$CASK_PATH"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$CASK_PATH"
+          git commit -m "chore: update Homebrew Cask to $VERSION"
+          git push origin "HEAD:${{ github.event.repository.default_branch }}"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch the tap sync
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::notice::Source Cask is current. HOMEBREW_TAP_TOKEN is not configured; run the Sync apps workflow in $TAP_REPOSITORY to refresh the tap."
+            exit 0
+          fi
+
+          gh api --method POST "repos/$TAP_REPOSITORY/dispatches" \
+            -f event_type=sync

@@ -54,6 +54,8 @@ APP_DIR="$VALIDATION_TMP/app/WhisprStream.app"
     exit 1
 }
 
+bash "$SCRIPT_DIR/validate-dictation-product.sh" "$APP_DIR"
+
 BIN="$APP_DIR/Contents/MacOS/WhisprStream"
 UPDATE_INSTALLER="$APP_DIR/Contents/Helpers/WhisprStreamUpdateInstaller"
 [ -x "$BIN" ] || { echo "error: app executable is missing" >&2; exit 1; }

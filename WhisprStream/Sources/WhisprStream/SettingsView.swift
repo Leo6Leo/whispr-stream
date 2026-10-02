@@ -283,6 +283,8 @@ private struct GeneralTab: View {
                 }
             }
 
+            CorrectionSettingsSection(settings: settings)
+
             Section {
                 LabeledContent("Language") {
                     Text("Automatic")

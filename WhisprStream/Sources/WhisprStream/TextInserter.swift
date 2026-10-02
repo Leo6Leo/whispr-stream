@@ -7,6 +7,131 @@ import AppKit
 /// scripts correctly. When clipboard retention is disabled, the previous
 /// pasteboard contents are restored after the paste.
 enum TextInserter {
+    struct ReviewTarget {
+        let application: NSRunningApplication
+        let element: AXUIElement?
+        let window: AXUIElement?
+        let windowID: CGWindowID?
+        let selectionAttribute: String?
+        let selection: CFTypeRef?
+        let originalValue: String?
+    }
+
+    /// Capture before the chooser takes focus. Custom editors (including WeChat)
+    /// may not expose a caret through Accessibility; keep their application and
+    /// window so returning from the chooser can still use ordinary paste.
+    static func captureReviewTarget() -> ReviewTarget? {
+        guard let app = NSWorkspace.shared.frontmostApplication,
+              app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return nil }
+        let element = focusedTextElement().flatMap { focused -> AXUIElement? in
+            var owner: pid_t = 0
+            return AXUIElementGetPid(focused, &owner) == .success && owner == app.processIdentifier
+                ? focused : nil
+        }
+        let window = element.flatMap { uiElementAttribute(of: $0, named: kAXWindowAttribute as String) }
+            ?? uiElementAttribute(of: AXUIElementCreateApplication(app.processIdentifier),
+                                  named: kAXFocusedWindowAttribute as String)
+        let selectionAttribute = element.flatMap { focused in
+            [kAXSelectedTextRangeAttribute as String, "AXSelectedTextMarkerRange"].first {
+                attributeValue(of: focused, named: $0) != nil
+            }
+        }
+        let selection = element.flatMap { focused in
+            selectionAttribute.flatMap { attributeValue(of: focused, named: $0) }
+        }
+        Log.write("review: captured target=\(app.bundleIdentifier ?? "?") caret=\(selection != nil)")
+        return ReviewTarget(application: app, element: element, window: window,
+                            windowID: frontWindowID(for: app.processIdentifier),
+                            selectionAttribute: selectionAttribute, selection: selection,
+                            originalValue: element.flatMap {
+                                attributeValue(of: $0, named: kAXValueAttribute as String) as? String
+                            })
+    }
+
+    /// Window IDs remain available for custom editors without AX text support.
+    /// Only metadata is read; no window contents or titles are needed.
+    private static func frontWindowID(for processID: pid_t) -> CGWindowID? {
+        guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                      kCGNullWindowID) as? [[String: Any]] else { return nil }
+        return windows.first {
+            ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == processID
+                && ($0[kCGWindowLayer as String] as? NSNumber)?.intValue == 0
+        }.flatMap { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value }
+    }
+
+    @MainActor
+    static func restoreReviewTarget(
+        _ target: ReviewTarget?,
+        isCurrent: @escaping () -> Bool = { true },
+        completion: @escaping (pid_t?) -> Void
+    ) {
+        guard isCurrent(), let target, !target.application.isTerminated else { completion(nil); return }
+        NSApp.yieldActivation(to: target.application)
+        target.application.activate(from: .current, options: [])
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.8
+        func restoreWhenActive() {
+            guard isCurrent(), !target.application.isTerminated else { completion(nil); return }
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == target.application.processIdentifier else {
+                guard ProcessInfo.processInfo.systemUptime < deadline else { completion(nil); return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { restoreWhenActive() }
+                return
+            }
+            // Do not restore an old range into a document edited while the
+            // chooser was open. The caller keeps the chosen text on clipboard.
+            if let element = target.element, let original = target.originalValue,
+               attributeValue(of: element, named: kAXValueAttribute as String) as? String != original {
+                completion(nil); return
+            }
+            if let window = target.window { AXUIElementPerformAction(window, kAXRaiseAction as CFString) }
+            if let element = target.element {
+                AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+                if let name = target.selectionAttribute, let selection = target.selection {
+                    AXUIElementSetAttributeValue(element, name as CFString, selection)
+                }
+            }
+            func verifyRestoration() {
+                guard isCurrent(),
+                      NSWorkspace.shared.frontmostApplication?.processIdentifier == target.application.processIdentifier,
+                      !target.application.isTerminated else { completion(nil); return }
+                if let element = target.element, let original = target.originalValue,
+                   attributeValue(of: element, named: kAXValueAttribute as String) as? String != original {
+                    completion(nil); return
+                }
+                let restored: Bool
+                if let element = target.element, let name = target.selectionAttribute, let selection = target.selection {
+                    // Editors with an exposed caret must still restore the
+                    // exact field and selection, not merely the application.
+                    restored = focusedTextElement().map { CFEqual($0, element) } == true
+                        && attributeValue(of: element, named: name).map { CFEqual($0, selection) } == true
+                } else {
+                    let currentWindow = uiElementAttribute(
+                        of: AXUIElementCreateApplication(target.application.processIdentifier),
+                        named: kAXFocusedWindowAttribute as String)
+                    let sameWindow = target.window.map { expected in
+                        currentWindow.map { CFEqual($0, expected) } == true
+                    } ?? target.windowID.map { frontWindowID(for: target.application.processIdentifier) == $0 } ?? false
+                    let sameField = target.element.map { expected in
+                        focusedTextElement().map { CFEqual($0, expected) } == true
+                    } ?? true
+                    restored = sameWindow && sameField
+                }
+                if restored {
+                    Log.write("review: restored target caret=\(target.selection != nil)")
+                    completion(target.application.processIdentifier)
+                } else if ProcessInfo.processInfo.systemUptime < deadline {
+                    // Some editors apply Accessibility focus/range changes on
+                    // their next event-loop turn. Verify without moving again.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { verifyRestoration() }
+                } else {
+                    Log.write("review: target restoration timed out; keeping transcript on clipboard")
+                    completion(nil)
+                }
+            }
+            verifyRestoration()
+        }
+        restoreWhenActive()
+    }
+
     private struct PasteboardSnapshot {
         let items: [[(NSPasteboard.PasteboardType, Data)]]
 
@@ -41,29 +166,34 @@ enum TextInserter {
         insertionText: String? = nil,
         insertAtCursor: Bool,
         copyToClipboard: Bool,
-        targetProcessID: pid_t? = nil
+        targetProcessID: pid_t? = nil,
+        completion: (() -> Void)? = nil
     ) {
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty else { completion?(); return }
 
         if insertAtCursor {
             insert(
                 insertionText ?? text,
                 clipboardAfterPaste: copyToClipboard ? text : nil,
-                targetProcessID: targetProcessID
+                targetProcessID: targetProcessID,
+                completion: completion
             )
         } else if copyToClipboard {
             copyOnly(text)
+            completion?()
         } else {
             Log.write("transcript delivered nowhere (both output options off)")
+            completion?()
         }
     }
 
     private static func insert(
         _ text: String,
         clipboardAfterPaste: String?,
-        targetProcessID: pid_t?
+        targetProcessID: pid_t?,
+        completion: (() -> Void)?
     ) {
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty else { completion?(); return }
 
         let front = NSWorkspace.shared.frontmostApplication
         Log.write("insert: \(text.count) chars -> front=\(front?.bundleIdentifier ?? "nil") "
@@ -85,6 +215,7 @@ enum TextInserter {
 
             if saved != nil || clipboardAfterPaste != text {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    defer { completion?() }
                     // Do not overwrite a clipboard update made by the user or
                     // the destination app while the paste was in flight.
                     guard pb.changeCount == insertedChangeCount else {
@@ -100,6 +231,8 @@ enum TextInserter {
                         Log.write("  retained clean transcript on clipboard")
                     }
                 }
+            } else {
+                completion?()
             }
         }
     }

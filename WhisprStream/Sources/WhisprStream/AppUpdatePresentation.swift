@@ -1,29 +1,6 @@
 import AppKit
 import SwiftUI
 
-/// Records which release has already received an automatic prompt.
-///
-/// A dismissed release remains visible in the menu bar and Settings, but the
-/// launch prompt is shown only once for that version. A later release gets its
-/// own prompt.
-struct AppUpdatePromptPolicy {
-    static let lastPromptedVersionKey = "updates.lastPromptedVersion"
-
-    private let defaults: UserDefaults
-
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-    }
-
-    func shouldPresent(version: String) -> Bool {
-        defaults.string(forKey: Self.lastPromptedVersionKey) != version
-    }
-
-    func markPresented(version: String) {
-        defaults.set(version, forKey: Self.lastPromptedVersionKey)
-    }
-}
-
 extension AppUpdateManager.Status {
     var availableRelease: AppUpdateManager.Release? {
         guard case let .available(release) = self else { return nil }

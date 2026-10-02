@@ -6,11 +6,21 @@ WhisprStream ships a small native app and a separately downloadable Apple-silico
 
 Use a relocatable standalone CPython 3.12 distribution. Do not use Homebrew Python or a venv.
 
-Public app version `1.0.2` compiles optional models out and intentionally reuses the immutable `WhisprStream-runtime-1.0.0-arm64.zip` asset. Do not rebuild or replace that asset under its existing version or URL. The signed app also pins the complete extracted runtime tree, including the bytecode shipped in that immutable archive; installed runtime verification never deletes or rewrites files.
+Public app version `1.0.3` compiles optional models out and intentionally reuses the immutable `WhisprStream-runtime-1.0.0-arm64.zip` asset. Do not rebuild or replace that asset under its existing version or URL. The signed app also pins the complete extracted runtime tree, including the bytecode shipped in that immutable archive; installed runtime verification never deletes or rewrites files.
 
 The current `build-runtime.sh` includes the experimental MLX Whisper adapter and is for a future runtime version only. Before enabling optional models publicly, resolve the deferred model-validation work, assign a new immutable runtime version (for example `1.1.0`), build it, and update every runtime value below.
 
 ## 2. Build the app
+
+Version `1.0.3` ships dictation only; Meeting Notes are unavailable. Build it
+from `codex/release-v1.0.3` without merging the experimental Meetings branch.
+`ENABLE_MEETINGS` defaults to `0`; any other value aborts before compilation
+or replacement of the app bundle. The builder and ZIP validator require actual
+plist booleans `LSUIElement=true` and `WhisprMeetingsEnabled=false`.
+Existing experimental meeting data stays on disk.
+
+Run the product packaging checks with
+`python3 -m unittest discover -s tests -p 'test_dictation_product_packaging.py'`.
 
 The app must embed an immutable tag-specific runtime URL, never `latest/download`:
 
@@ -45,11 +55,11 @@ The expected code-signing certificate SHA-1 is independently pinned in
 an update key, repository, or signing identity that differs from these reviewed
 trust roots. Change a pin only as an explicit key-rotation procedure.
 
-App version `1.0.2` intentionally reuses runtime version `1.0.0`; the runtime
+App version `1.0.3` intentionally reuses runtime version `1.0.0`; the runtime
 version changes only when the standalone Python or dependency payload changes.
 
 ```bash
-RELEASE=1 VERSION=1.0.2 BUILD_NUMBER=5 ENABLE_OPTIONAL_MODELS=0 \
+RELEASE=1 VERSION=1.0.3 BUILD_NUMBER=6 ENABLE_OPTIONAL_MODELS=0 \
 BUNDLE_IDENTIFIER="com.leoleo.whisprstream" \
 SIGNING_IDENTITY="WhisprStream Self-Signed" \
 RUNTIME_VERSION=1.0.0 \
@@ -94,7 +104,7 @@ shasum -a 256 WhisprStream-macos-arm64.zip \
   WhisprStream-runtime-1.0.0-arm64.zip > SHA256SUMS
 WhisprStream/validate-release.sh WhisprStream-macos-arm64.zip \
   WhisprStream-runtime-1.0.0-arm64.zip SHA256SUMS \
-  WhisprStream-macos-arm64.zip.ed25519 1.0.2 5
+  WhisprStream-macos-arm64.zip.ed25519 1.0.3 6
 ```
 
 ## Local updater dry runs
@@ -141,11 +151,11 @@ builds continue to require HTTPS GitHub release and asset URLs.
 
 Create one certificate using [`make-signing-cert.md`](WhisprStream/make-signing-cert.md), keep its private key outside the repository, and back it up securely. Reuse the same identity for every release; losing the key changes the app's code identity and may require permissions to be granted again.
 
-Self-signing does not provide Apple trust, does not notarize the app, and does not remove the unknown-developer warning. Release notes must point users to **System Settings → Privacy & Security → Open Anyway**. Never tell users to disable Gatekeeper or run broad `xattr` commands.
+Self-signing does not provide Apple trust, does not notarize the app, and does not remove the unknown-developer warning. Direct-download release notes must point users to **System Settings → Privacy & Security → Open Anyway**. Never tell users to disable Gatekeeper or run broad `xattr` commands. The custom Homebrew Cask may remove quarantine only from the Cask-installed `WhisprStream.app`; keep that behavior narrowly scoped and disclosed in the Cask caveats.
 
 ## 4. Draft release and clean-Mac qualification
 
-For this release, create a draft GitHub Release tagged `v1.0.2`, upload:
+For this release, create a draft GitHub Release tagged `v1.0.3`, upload:
 
 - `WhisprStream-macos-arm64.zip`
 - `WhisprStream-macos-arm64.zip.ed25519`
@@ -175,9 +185,87 @@ On a fresh macOS user account with no previous microphone grant, explicitly veri
 Moving an app into Applications does not register a microphone request. Local
 non-hardened builds and accounts with existing grants do not qualify this check.
 
+Before approving 1.0.3, also exercise these dictation regressions with the built
+candidate:
+
+- Final recognition must retain negations, rewrites, and newly spoken tails even
+  if the live preview held an older phrase. Word review may offer the earlier
+  spelling as an alternative; it must not silently replace the final decode.
+- Start another dictation while the previous HUD is fading out. The new HUD,
+  recording timer, key-release stop, and final insertion must all keep working.
+- With context-aware capitalization enabled in an editor that needs keyboard
+  probing, start another dictation as the preceding result arrives. Recording
+  must start immediately, while the next cursor probe and transcript wait for
+  the preceding paste and clipboard cleanup. Verify that both texts arrive in
+  order, including a very short second dictation. Repeat with word review on
+  and with context-aware capitalization off.
+- Inject an ASR failure or terminate its process while recording in both hold
+  and tap mode. Recording and the macOS microphone indicator must stop before
+  the failure HUD disappears. The next shortcut must restart engine warm-up;
+  after Ready, another press must record normally. Repeat during word review
+  and microphone route recovery; no aborted transcript may be inserted or
+  learned, and an old review callback must not restore focus after failure.
+- Repeat a shortcut retry when the sidecar executable cannot be started. Each
+  attempt must show its error briefly and return to idle; the HUD must not
+  remain stuck after a synchronous launch failure.
+- Let an automatic update check finish during recording, word review, cursor
+  probing, and final paste. The badge may update immediately, but the automatic
+  window must wait until dictation and clipboard cleanup finish, then appear
+  once. Include rapid consecutive dictations while an update is pending.
+- Check ordinary Spaces and another app's native full-screen Space, including
+  switching Spaces during recording, on macOS 14 and a supported newer system.
+  Pure lifecycle tests do not qualify real window visibility or focus behavior.
+
+Run `python3 -m pytest` and `swift test --package-path WhisprStream`. When only
+Command Line Tools are available, the HUD/update policy checks can also run
+without XCTest:
+
+```bash
+swiftc WhisprStream/Sources/WhisprStream/HUDPresentationState.swift \
+  WhisprStream/Sources/WhisprStream/AppUpdatePromptPolicy.swift \
+  WhisprStream/Tests/WhisprStreamTests/ReleaseLifecycleChecks.swift \
+  tests/test_release_lifecycle.swift -o /tmp/whispr-release-lifecycle-checks
+/tmp/whispr-release-lifecycle-checks
+```
+
+`tests/test_dictation_failure_recovery.py` compiles the current AppDelegate
+lifecycle methods with inert microphone, process, keyboard, and UI boundaries.
+It checks failure cleanup, repeated failed retries, stale callbacks, overlapping
+paste/probe requests, and normal completion without loading a model or changing
+the real clipboard. To select an installed
+SDK explicitly, set `WHISPR_TEST_SWIFT_SDK` when running these Python tests.
+
+The standalone checks do not replace the complete Swift test suite or signed
+archive validation. Rebuild and sign the app archive from the qualified source;
+the previously checked-in 1.0.2 archive is not a 1.0.3 candidate. Increment the
+build number again if a build 6 candidate has already been distributed.
+
 ## 5. Website and update checks
 
-Confirm the website's download link resolves to the stable app asset and that all source links resolve to [github.com/Leo6Leo/whispr-stream](https://github.com/Leo6Leo/whispr-stream). The website must not advertise a Homebrew command until a real Cask exists.
+Confirm the website's download link resolves to the stable app asset and that all source links resolve to [github.com/Leo6Leo/whispr-stream](https://github.com/Leo6Leo/whispr-stream). Confirm the Homebrew command installs the exact published version from `Leo6Leo/homebrew-tap`.
+
+## 6. Homebrew Tap sync
+
+`Casks/whispr-stream.rb` is the source of truth. Publishing a stable GitHub
+Release runs `.github/workflows/sync-homebrew-cask.yml`, which downloads the
+exact `WhisprStream-macos-arm64.zip`, calculates its SHA-256, updates the source
+Cask, and dispatches the `sync` workflow in `Leo6Leo/homebrew-tap`.
+
+Add a `HOMEBREW_TAP_TOKEN` Actions secret to this repository. Use a fine-grained
+GitHub personal access token limited to `Leo6Leo/homebrew-tap` with **Contents:
+Read and write** permission. The tap repository must contain `apps.json` and its
+`Sync apps` workflow. For an already-published release or a retry, run **Sync
+Homebrew Cask** manually and enter its stable tag, such as `v1.0.2`.
+
+Without `HOMEBREW_TAP_TOKEN`, the source Cask is still updated and the workflow
+reports that tap dispatch was skipped. Run **Sync apps** directly in
+`Leo6Leo/homebrew-tap` to finish that release's Homebrew update.
+
+This Homebrew publishing flow is adapted from
+[@logonoff](https://github.com/logonoff)'s
+[SuperOpt](https://github.com/logonoff/superopt) and
+[homebrew-bucket](https://github.com/logonoff/homebrew-bucket). Credit this
+work when describing the Homebrew release setup.
 
 In Settings → About, confirm that the update checker accepts exact stable semantic versions such as `v1.0.2`, ignores drafts and prereleases, rejects missing, oversized, duplicate, or incorrectly signed assets, and offers **Install and Relaunch** only after discovering both exact update assets. Test a valid signed update end to end from a writable copy in Applications, including relaunch after a quarantined download, plus tampered-signature and read-only-location failures. Quarantine is cleared only from a replacement that has passed the pinned Ed25519 signature and bundle checks. The manual GitHub button must remain available as recovery.
 
@@ -205,6 +293,6 @@ testing without relaunching.
 This mode is developer-only and is never included as a public runtime path.
 
 Local builds enable experimental optional models by default. Use
-`ENABLE_OPTIONAL_MODELS=0 WhisprStream/build.sh` to reproduce the public 1.0.2
+`ENABLE_OPTIONAL_MODELS=0 WhisprStream/build.sh` to reproduce the public 1.0.3
 model UI and runtime requirements. `RELEASE=1` always enforces that setting and
 cannot be overridden.

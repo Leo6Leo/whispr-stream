@@ -30,6 +30,16 @@ WhisprStream is an open-source macOS dictation app that types at your cursor whi
 - Apple silicon Mac
 - Approximately 4 GB free for the speech engine and recommended 0.6B model
 
+### Install with Homebrew
+
+```bash
+brew install --cask Leo6Leo/tap/whispr-stream
+```
+
+The custom Cask pins the release checksum and removes quarantine only from the
+installed WhisprStream app. It does not disable Gatekeeper. Public builds are
+self-signed and not notarized by Apple.
+
 ### Download and first launch
 
 1. Open [GitHub Releases](https://github.com/Leo6Leo/whispr-stream/releases), download `WhisprStream-macos-arm64.zip` from the latest published release, extract it, and move **WhisprStream** to Applications.
@@ -38,11 +48,11 @@ WhisprStream is an open-source macOS dictation app that types at your cursor whi
 4. Choose a speech model. Qwen3-ASR 0.6B is the recommended download at approximately 1.9 GB. Qwen3-ASR 1.7B is approximately 4.3 GB and is best suited to Macs with at least 16 GB of unified memory.
 5. Grant Microphone and Accessibility access, or finish those steps later from **Settings → Permissions**.
 
-The native app, speech engine, and model are separate. The engine and model are downloaded only when needed, remain on your Mac, and survive normal app updates. No Python, Homebrew, pip, Xcode, Terminal, account, or audio upload is required. See the full [installation and recovery guide](INSTALL.md).
+The native app, speech engine, and model are separate. The engine and model are downloaded only when needed, remain on your Mac, and survive normal app updates. The direct-download path requires no Python, Homebrew, pip, Xcode, Terminal, account, or audio upload. See the full [installation and recovery guide](INSTALL.md).
 
 ### Experimental optional models
 
-Custom Qwen3-ASR and MLX Whisper models are still under development. They are behind a compile-time feature gate and are not available in the public 1.0.2 build. Local source builds enable the experimental UI by default; use `ENABLE_OPTIONAL_MODELS=0 WhisprStream/build.sh` to reproduce the public behavior.
+Custom Qwen3-ASR and MLX Whisper models are still under development. They are behind a compile-time feature gate and are not available in the public 1.0.3 build. Local source builds enable the experimental UI by default; use `ENABLE_OPTIONAL_MODELS=0 WhisprStream/build.sh` to reproduce the public behavior.
 
 ### Interrupted downloads and repair
 
@@ -76,7 +86,7 @@ Hold the Right Option key, speak, and release; the transcript is inserted into t
 
 ## Open source and model flexibility
 
-WhisprStream is MIT licensed and designed to be inspected, adapted, and extended. The public 1.0.2 app offers the built-in Qwen3-ASR models. Experimental adapters for custom Qwen3-ASR and MLX Whisper checkpoints remain available to source-build developers behind a compile-time gate. A model does not need native streaming support: WhisprStream can repeatedly transcribe the full utterance, preserve context across language switches, and turn stable output into a live stream.
+WhisprStream is MIT licensed and designed to be inspected, adapted, and extended. The public 1.0.3 app offers the built-in Qwen3-ASR models. Experimental adapters for custom Qwen3-ASR and MLX Whisper checkpoints remain available to source-build developers behind a compile-time gate. A model does not need native streaming support: WhisprStream can repeatedly transcribe the full utterance, preserve context across language switches, and turn stable output into a live stream.
 
 The native Swift front end and Python ASR sidecar communicate locally over a small newline-delimited JSON protocol. See [HANDOFF.md](HANDOFF.md) for architecture notes and troubleshooting.
 

@@ -6,6 +6,7 @@ import SwiftUI
 struct DeferredTranscriptDelivery: Equatable {
     let text: String
     let adjustForCursor: Bool
+    var review: DictationReview? = nil
 }
 
 struct TranscriptDeliveryGate {
@@ -30,31 +31,6 @@ struct TranscriptDeliveryGate {
 
     mutating func reset() {
         pending = nil
-    }
-}
-
-/// A resident model can remain logically loaded while macOS pages its memory
-/// out. Treat readiness as a lease so the first dictation after a long idle
-/// pays any restoration cost in the explicit warm-up UI, not after recording.
-struct SpeechEngineWarmupGate {
-    static let idleInterval: TimeInterval = 5 * 60
-
-    private(set) var lastActivityAt: Date?
-
-    mutating func markActivity(at date: Date = Date()) {
-        lastActivityAt = date
-    }
-
-    mutating func reset() {
-        lastActivityAt = nil
-    }
-
-    func requiresWarmup(
-        at date: Date = Date(),
-        idleInterval: TimeInterval = Self.idleInterval
-    ) -> Bool {
-        guard let lastActivityAt else { return false }
-        return date.timeIntervalSince(lastActivityAt) >= idleInterval
     }
 }
 
@@ -117,8 +93,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var asr: ASRService!
     private var dismissWork: DispatchWorkItem?
     private var isASRReady = false
-    private var isRewarmingSpeechEngine = false
-    private var speechEngineWarmupGate = SpeechEngineWarmupGate()
     private var speechEngineGeneration = 0
     private var speechEngineStartedAt: TimeInterval?
     private var speechEngineStartupWork: DispatchWorkItem?
@@ -130,6 +104,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var transcriptDeliveryGate = TranscriptDeliveryGate()
     private var cursorContextGeneration = 0
     private var activeCursorContextGeneration: Int?
+    private var reviewPanel: DictationReviewPanel?
+    private var reviewTarget: TextInserter.ReviewTarget?
+    private var pendingTranscriptDeliveries = 0
+    private var needsCursorSnapshotAfterDelivery = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // The updater retains its rollback copy until this process proves that
@@ -211,6 +189,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         initialUpdateCheckWork?.cancel()
         periodicUpdateTimer?.invalidate()
         updateStatusObservation?.cancel()
+        capture.stop()
+        state.stopDictationTimer()
         hotkey?.stop()
         speechEngineStartupWork?.cancel()
         asr?.shutdown()
@@ -277,9 +257,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the previous value while this callback is running. Use the emitted
         // value directly to keep the badge and menu in sync on the first frame.
         refreshStatusMenu(using: status)
+        if case .available = status { scheduleAutomaticUpdatePrompt() }
+    }
+
+    private func scheduleAutomaticUpdatePrompt() {
+        // Wait until @Published has committed the status and any enclosing
+        // cancellation/error handler has finished changing dictation state.
+        DispatchQueue.main.async { [weak self] in
+            self?.presentAutomaticUpdateIfPossible()
+        }
+    }
+
+    private func presentAutomaticUpdateIfPossible() {
+        let isBusy = state.phase != .idle || reviewPanel != nil
+            || activeCursorContextGeneration != nil || pendingTranscriptDeliveries > 0
         guard settings.hasCompletedOnboarding,
-              case let .available(release) = status,
-              updatePromptPolicy.shouldPresent(version: release.version)
+              case let .available(release) = updates.status,
+              updatePromptPolicy.shouldPresent(version: release.version, isBusy: isBusy)
         else { return }
 
         updatePromptPolicy.markPresented(version: release.version)
@@ -317,21 +311,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startSpeechEngine() {
         guard asr == nil else { return }
         isASRReady = false
-        isRewarmingSpeechEngine = false
-        speechEngineWarmupGate.reset()
-        state.phase = .loading
-        do {
-            try launchSpeechEngine()
-        } catch {
-            state.phase = .failed("Could not start the ASR engine")
-            panel.present()
-            return
-        }
 
-        hotkey = HotKeyMonitor(
-            shortcut: settings.triggerShortcut,
-            mode: settings.activationMode
-        )
+        // Keep input available even when startup fails, so the next press can
+        // retry. Reuse the monitor instead of leaving old global hooks behind.
+        if hotkey == nil {
+            hotkey = HotKeyMonitor(
+                shortcut: settings.triggerShortcut,
+                mode: settings.activationMode
+            )
+        }
         hotkey.onStart = { [weak self] in
             guard let self, self.beginDictation() else { return false }
             if self.shouldShowFirstDictationCoach {
@@ -355,23 +343,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         hotkey.setSuspendedForShortcutCapture(settings.isCapturingTriggerShortcut)
         settings.onContextChange = { [weak self] terms in self?.asr?.setContext(terms) }
+        settings.onLearningChange = { [weak self] in self?.refreshLearnedContext() }
+        CorrectionStore.shared.onChange = { [weak self] in self?.refreshLearnedContext() }
         settings.onModelChange = { [weak self] _ in self?.reloadASR() }
         settings.onShortUtteranceLanguageChange = { [weak self] _ in self?.reloadASR() }
         capture.onBuffer = { [weak self] pcm, level in
             self?.asr?.sendAudio(pcm)
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, self.state.phase == .listening else { return }
                 self.state.level = self.state.level * 0.55 + CGFloat(level) * 0.45
             }
         }
         capture.onFailure = { [weak self] error in
             guard let self, self.state.phase == .listening else { return }
-            self.state.stopDictationTimer()
-            self.state.level = 0
-            self.state.phase = .failed("Microphone unavailable")
-            self.asr.stopUtterance()
             Log.write("microphone capture stopped: \(error.localizedDescription)")
-            self.scheduleDismiss(after: 1.8)
+            self.failSpeechEngine("Microphone unavailable")
+        }
+
+        do {
+            try launchSpeechEngine()
+        } catch {
+            failSpeechEngine("Could not start the ASR engine")
+            return
         }
         refreshStatusMenu()
     }
@@ -396,17 +389,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self,
                   self.speechEngineGeneration == generation,
                   !self.isASRReady else { return }
-            let operation = self.isRewarmingSpeechEngine ? "warm-up" : "startup"
-            Log.write("speech engine \(operation) timed out after \(Int(Self.speechEngineStartupTimeout))s")
-            self.settings.isReloadingModel = false
-            self.speechEngineGeneration &+= 1
-            self.asr?.shutdown()
-            self.asr = nil
-            self.isRewarmingSpeechEngine = false
-            self.speechEngineWarmupGate.reset()
-            self.state.phase = .failed("Speech engine took too long to \(operation == "warm-up" ? "warm up" : "start")")
-            self.panel.present()
-            self.refreshStatusMenu()
+            Log.write("speech engine startup timed out after \(Int(Self.speechEngineStartupTimeout))s")
+            self.failSpeechEngine("Speech engine took too long to start")
         }
         speechEngineStartupWork = work
         DispatchQueue.main.asyncAfter(
@@ -449,7 +433,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             engine: engine,
             bits: bits,
             context: settings.asrContext,
-            shortUtteranceLanguage: settings.shortUtteranceLanguage
+            shortUtteranceLanguage: settings.shortUtteranceLanguage,
+            learnedContext: learnedContext
         )
     }
 
@@ -459,22 +444,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// applied to the running process the way the vocabulary can — the whole
     /// sidecar has to come down and pay the load again.
     private func reloadASR() {
-        // Deliberately does not drive the HUD's `.loading` phase: the user is in
-        // Settings, not dictating, and racing a phase change against the dismiss
-        // animation is what makes the capsule flicker. Progress is reported in
-        // the Settings window instead.
+        speechEngineGeneration &+= 1
+        hotkey?.cancelActiveDictation()
+        if state.phase == .thinking {
+            reviewPanel?.cancel()
+            reviewPanel = nil
+            reviewTarget = nil
+            cancelCursorContextResolution()
+            dismissNow()
+        }
+        // Reload in the background, reporting progress only in Settings.
         if state.phase == .listening {
             capture.stop()
             state.stopDictationTimer()
             state.level = 0
+            cancelCursorContextResolution()
             dismissNow()
         }
 
         speechEngineStartupWork?.cancel()
-        speechEngineGeneration &+= 1
         isASRReady = false
-        isRewarmingSpeechEngine = false
-        speechEngineWarmupGate.reset()
         speechEngineStartedAt = nil
         asr?.shutdown()
         asr = nil
@@ -483,10 +472,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             try launchSpeechEngine()
         } catch {
-            settings.isReloadingModel = false
-            state.phase = .failed("Could not start the ASR engine")
-            panel.present()
-            scheduleDismiss(after: 2.0)
+            failSpeechEngine("Could not start the ASR engine")
         }
         refreshStatusMenu()
     }
@@ -622,21 +608,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @discardableResult
     private func beginDictation() -> Bool {
-        guard isASRReady else {
-            guard asr != nil else {
-                state.phase = .failed("Speech engine is not running")
-                panel.present()
-                scheduleDismiss(after: 1.8)
-                return false
-            }
-            state.phase = .loading
-            panel.present()
-            return false
-        }
-        if speechEngineWarmupGate.requiresWarmup() {
-            beginIdleSpeechEngineWarmup()
-            return false
-        }
+        guard reviewPanel == nil, state.phase != .thinking else { return false }
+        if asr == nil { startSpeechEngine() }
+        // The serial sidecar writer queues start/audio/stop while the model
+        // loads and warms once in the background. Capture immediately so the
+        // first shortcut press works, including after a long idle or restart.
+        // A synchronous launch failure has already presented its error.
+        guard asr != nil else { return false }
         guard state.phase != .listening else { return false }
         guard activeCursorContextGeneration == nil else {
             Log.write("dictation start ignored while cursor context probe settles")
@@ -647,12 +625,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         resolvedPrecedingText = nil
         isResolvingPrecedingText = false
         transcriptDeliveryGate.reset()
-        precedingTextAtDictationStart = settings.autoInsert
-            && settings.contextAwareCapitalization
-            ? TextInserter.textBeforeCursor()
-            : nil
-        resolvedPrecedingText = precedingTextAtDictationStart
-        hasResolvedPrecedingText = precedingTextAtDictationStart != nil
+        reviewTarget = nil
+        precedingTextAtDictationStart = nil
+        hasResolvedPrecedingText = false
+        // Recording can start immediately, but the preceding paste still
+        // owns the clipboard and may change this field's value and selection.
+        needsCursorSnapshotAfterDelivery = pendingTranscriptDeliveries > 0
+        if !needsCursorSnapshotAfterDelivery { captureDictationCursorSnapshot() }
         state.reset()
         state.phase = .listening
         state.startDictationTimer()
@@ -675,35 +654,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return true
         } catch {
-            asr.stopUtterance()
-            cancelCursorContextResolution()
-            state.stopDictationTimer()
-            state.phase = .failed("Microphone unavailable")
-            scheduleDismiss(after: 1.6)
+            failSpeechEngine("Microphone unavailable")
             return false
         }
     }
 
-    private func beginIdleSpeechEngineWarmup() {
-        guard isASRReady, !isRewarmingSpeechEngine, asr != nil else { return }
-        dismissWork?.cancel()
-        isASRReady = false
-        isRewarmingSpeechEngine = true
-        state.reset()
-        state.phase = .loading
-        panel.present()
-        speechEngineStartedAt = ProcessInfo.processInfo.systemUptime
-        Log.write("speech engine idle lease expired; starting readiness warm-up")
-        asr.warmUp()
-        armSpeechEngineStartupTimeout(generation: speechEngineGeneration)
-        refreshStatusMenu()
-    }
-
     private func endDictation() {
-        // Releasing the shortcut during first-launch warm-up must not dismiss
-        // the HUD. Startup completion owns that lifecycle and replaces it with
-        // the brief Ready state before dismissal.
-        guard state.phase != .loading else { return }
         guard state.phase == .listening else { return }
         capture.stop()
         state.stopDictationTimer()
@@ -721,18 +677,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func handle(_ event: ASRService.Event) {
         switch event {
         case let .ready(ms):
-            completeSpeechEngineWarmup(ms: ms, kind: "startup")
-
-        case let .warmed(ms):
-            completeSpeechEngineWarmup(ms: ms, kind: "idle")
+            completeSpeechEngineStartup(ms: ms)
 
         case let .partial(committed, tail):
             guard state.phase == .listening else { return }
             state.committed = committed
             state.tail = tail
 
-        case let .final(text, secs, ms):
-            speechEngineWarmupGate.markActivity()
+        case let .final(text, secs, ms, review):
+            guard state.phase == .thinking, reviewPanel == nil else { return }
             precedingTextAtDictationStart = nil
             state.lastAudioSecs = secs
             state.lastDurationMS = ms
@@ -741,110 +694,104 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 dismissNow()
                 return
             }
-            let normalizedText = SpokenSymbolNormalizer.normalize(
-                SpelledLetterNormalizer.normalize(
-                    SpokenNumberNormalizer.normalize(text)
-                )
-            )
-            let formattedText = TranscriptFormatter.format(
-                normalizedText,
-                usePunctuation: settings.usePunctuation
-            )
-            let expansion = TranscriptExpander.expand(formattedText, using: settings.voiceShortcuts)
-            if let matchedID = expansion.matchedShortcutID {
-                Log.write("voice shortcut matched id=\(matchedID) inputChars=\(normalizedText.count) outputChars=\(expansion.text.count)")
-            }
-            // Shortcut replacements are user-authored literal output; preserve
-            // their casing even when they are inserted mid-sentence. Every
-            // delivery still passes through the gate: a keyboard cursor probe
-            // owns the selection and pasteboard until its completion callback,
-            // even when the final text does not need capitalization adjustment.
-            let delivery = DeferredTranscriptDelivery(
-                text: expansion.text,
-                adjustForCursor: settings.autoInsert
-                    && settings.contextAwareCapitalization
-                    && expansion.matchedShortcutID == nil
-            )
+            let delivery = prepareDelivery(text, review: review)
             if let ready = transcriptDeliveryGate.submit(
                 delivery,
                 whileContextIsResolving: isResolvingPrecedingText
+                    || pendingTranscriptDeliveries > 0 || needsCursorSnapshotAfterDelivery
             ) {
                 deliverTranscript(ready)
             } else {
-                Log.write("transcript delivery waiting for cursor context probe")
+                Log.write("transcript delivery waiting for clipboard or cursor context")
             }
 
-        case let .error(message):
-            cancelCursorContextResolution()
-            if !isASRReady {
-                speechEngineStartupWork?.cancel()
-                speechEngineStartupWork = nil
-                speechEngineStartedAt = nil
-                Log.write("speech engine startup failed: \(message)")
-                speechEngineGeneration &+= 1
-                asr?.shutdown()
-                asr = nil
-                isRewarmingSpeechEngine = false
-                speechEngineWarmupGate.reset()
-                settings.isReloadingModel = false
-                refreshStatusMenu()
-            }
-            state.stopDictationTimer()
-            state.phase = .failed(message)
-            scheduleDismiss(after: 1.8)
-
-        case let .terminated(message):
-            cancelCursorContextResolution()
-            speechEngineStartupWork?.cancel()
-            speechEngineStartupWork = nil
-            speechEngineStartedAt = nil
-            speechEngineGeneration &+= 1
-            isASRReady = false
-            isRewarmingSpeechEngine = false
-            speechEngineWarmupGate.reset()
-            asr = nil
-            settings.isReloadingModel = false
-            state.stopDictationTimer()
-            state.phase = .failed(message)
-            refreshStatusMenu()
-            scheduleDismiss(after: 1.8)
+        case let .error(message), let .terminated(message):
+            failSpeechEngine(message)
         }
     }
 
-    private func completeSpeechEngineWarmup(ms: Int, kind: String) {
+    private func failSpeechEngine(_ message: String) {
+        // Stop hardware before leaving .listening: key release and the safety
+        // timer can no longer own cleanup once the UI has entered .failed.
+        capture.stop()
+        hotkey?.cancelActiveDictation()
+        state.stopDictationTimer()
+        state.level = 0
+
+        speechEngineStartupWork?.cancel()
+        speechEngineStartupWork = nil
+        speechEngineStartedAt = nil
+        // Retire the entire sidecar, fencing both queued events and review
+        // callbacks. Sending only "stop" could deliver an aborted final during
+        // the next dictation. A new shortcut press can restart the engine.
+        speechEngineGeneration &+= 1
+        isASRReady = false
+        asr?.shutdown()
+        asr = nil
+        settings.isReloadingModel = false
+
+        reviewPanel?.cancel()
+        reviewPanel = nil
+        reviewTarget = nil
+        cancelCursorContextResolution()
+        state.phase = .failed(message)
+        panel.present()
+        refreshStatusMenu()
+        scheduleDismiss(after: 1.8)
+    }
+
+    private func completeSpeechEngineStartup(ms: Int) {
         let wallMS = speechEngineStartedAt.map {
             Int((ProcessInfo.processInfo.systemUptime - $0) * 1000)
         } ?? ms
-        Log.write("speech engine ready: kind=\(kind) reported=\(ms)ms wall=\(wallMS)ms")
+        Log.write("speech engine ready: kind=startup reported=\(ms)ms wall=\(wallMS)ms")
         speechEngineStartupWork?.cancel()
         speechEngineStartupWork = nil
         speechEngineStartedAt = nil
         isASRReady = true
-        isRewarmingSpeechEngine = false
-        speechEngineWarmupGate.markActivity()
         settings.isReloadingModel = false
         presentFirstDictationCoachIfReady()
-        if state.phase == .loading {
-            if panel.isVisible {
-                state.phase = .ready
-                scheduleDismiss(after: 0.65)
-            } else {
-                state.phase = .idle
-            }
-        }
+        // Readiness must not replace an active recording or pending final,
+        // nor present a HUD when startup completes without user interaction.
         refreshStatusMenu()
+        scheduleAutomaticUpdatePrompt()
     }
 
     private func deliverPendingTranscriptIfReady() {
-        guard !isResolvingPrecedingText,
+        guard pendingTranscriptDeliveries == 0,
+              !needsCursorSnapshotAfterDelivery, !isResolvingPrecedingText,
               let delivery = transcriptDeliveryGate.takePending() else { return }
         deliverTranscript(delivery)
+    }
+
+    private func captureDictationCursorSnapshot() {
+        needsCursorSnapshotAfterDelivery = false
+        reviewTarget = settings.reviewUncertainWords ? TextInserter.captureReviewTarget() : nil
+        precedingTextAtDictationStart = settings.autoInsert
+            && settings.contextAwareCapitalization
+            ? TextInserter.textBeforeCursor()
+            : nil
+        resolvedPrecedingText = precedingTextAtDictationStart
+        hasResolvedPrecedingText = precedingTextAtDictationStart != nil
+    }
+
+    private func resumeDictationAfterDelivery() {
+        guard pendingTranscriptDeliveries == 0 else { return }
+        if needsCursorSnapshotAfterDelivery {
+            guard state.phase == .listening || state.phase == .thinking else { return }
+            captureDictationCursorSnapshot()
+            if settings.autoInsert, settings.contextAwareCapitalization, !hasResolvedPrecedingText {
+                startCursorContextResolution(allowWhilePhysicalModifiersPressed: state.phase == .listening)
+            }
+        }
+        deliverPendingTranscriptIfReady()
     }
 
     private func startCursorContextResolution(
         allowWhilePhysicalModifiersPressed: Bool
     ) {
-        guard !isResolvingPrecedingText, !hasResolvedPrecedingText else { return }
+        guard pendingTranscriptDeliveries == 0,
+              !isResolvingPrecedingText, !hasResolvedPrecedingText else { return }
         let contextGeneration = cursorContextGeneration
         let startedAt = ProcessInfo.processInfo.systemUptime
         isResolvingPrecedingText = true
@@ -857,6 +804,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                   self.activeCursorContextGeneration == contextGeneration else { return }
             self.activeCursorContextGeneration = nil
             self.isResolvingPrecedingText = false
+            defer { self.scheduleAutomaticUpdatePrompt() }
             guard self.cursorContextGeneration == contextGeneration else { return }
             self.hasResolvedPrecedingText = true
             self.resolvedPrecedingText = text
@@ -874,6 +822,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func deliverTranscript(_ delivery: DeferredTranscriptDelivery) {
         let precedingText = delivery.adjustForCursor ? resolvedPrecedingText : nil
         cancelCursorContextResolution()
+        if settings.reviewUncertainWords, let review = delivery.review {
+            presentReview(review, precedingText: precedingText)
+            return
+        }
         deliverFinalTranscript(
             delivery.text,
             precedingText: precedingText,
@@ -881,8 +833,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
+    private var learnedContext: String {
+        settings.learnFromCorrections ? CorrectionStore.shared.preferredTerms.joined(separator: "\n") : ""
+    }
+
+    private func refreshLearnedContext() { asr?.setLearnedContext(learnedContext) }
+
+    private func prepareDelivery(_ text: String, review: DictationReview? = nil) -> DeferredTranscriptDelivery {
+        let normalized = SpokenSymbolNormalizer.normalize(
+            SpelledLetterNormalizer.normalize(SpokenNumberNormalizer.normalize(text))
+        )
+        let formatted = TranscriptFormatter.format(normalized, usePunctuation: settings.usePunctuation)
+        let expansion = TranscriptExpander.expand(formatted, using: settings.voiceShortcuts)
+        // Explicit shortcut expansions remain literal and bypass word review.
+        return DeferredTranscriptDelivery(
+            text: expansion.text,
+            adjustForCursor: settings.autoInsert && settings.contextAwareCapitalization
+                && expansion.matchedShortcutID == nil,
+            review: expansion.matchedShortcutID == nil ? review : nil
+        )
+    }
+
+    private func presentReview(_ review: DictationReview, precedingText: String?) {
+        dismissWork?.cancel()
+        panel.dismiss()
+        let target = reviewTarget
+        let savesChoices = settings.learnFromCorrections
+        let model = settings.model.rawValue
+        let generation = speechEngineGeneration
+        reviewPanel = DictationReviewPanel(review: review, savesChoices: savesChoices) { [weak self] text, manual in
+            guard let self, self.speechEngineGeneration == generation else { return }
+            self.reviewPanel = nil
+            self.reviewTarget = nil
+            guard let text else {
+                target?.application.activate(options: [])
+                self.state.phase = .idle
+                self.scheduleAutomaticUpdatePrompt()
+                return
+            }
+            if savesChoices && self.settings.learnFromCorrections {
+                CorrectionStore.shared.record(review, chosenText: text, model: model, manual: manual)
+            }
+            let chosen = self.prepareDelivery(text)
+            guard self.settings.autoInsert else {
+                target?.application.activate(options: [])
+                self.panel.present()
+                self.deliverFinalTranscript(chosen.text, precedingText: nil, adjustForCursor: false)
+                return
+            }
+            TextInserter.restoreReviewTarget(target, isCurrent: { [weak self] in
+                self?.speechEngineGeneration == generation
+            }) { [weak self] processID in
+                guard let self, self.speechEngineGeneration == generation else { return }
+                self.panel.present()
+                self.deliverFinalTranscript(chosen.text, precedingText: precedingText,
+                                            adjustForCursor: chosen.adjustForCursor && processID != nil,
+                                            targetProcessID: processID, forceClipboard: processID == nil)
+            }
+        }
+        reviewPanel?.show()
+    }
+
     private func cancelCursorContextResolution() {
         cursorContextGeneration &+= 1
+        needsCursorSnapshotAfterDelivery = false
         precedingTextAtDictationStart = nil
         resolvedPrecedingText = nil
         hasResolvedPrecedingText = false
@@ -895,7 +909,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func deliverFinalTranscript(
         _ text: String,
         precedingText: String?,
-        adjustForCursor: Bool
+        adjustForCursor: Bool,
+        targetProcessID: pid_t? = nil,
+        forceClipboard: Bool = false
     ) {
         let deliveredText = adjustForCursor
             ? TranscriptFormatter.adjustedForCursor(text, precedingText: precedingText)
@@ -907,21 +923,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let insertionText = TranscriptFormatter.textForInsertion(deliveredText)
         state.committed = deliveredText
         state.tail = ""
-        state.phase = .inserted
+        state.phase = forceClipboard ? .failed("Copied — return to your original field to paste") : .inserted
 
+        pendingTranscriptDeliveries += 1
         TextInserter.deliver(
             deliveredText,
             insertionText: insertionText,
-            insertAtCursor: settings.autoInsert,
-            copyToClipboard: settings.copyToClipboard
+            insertAtCursor: settings.autoInsert && !forceClipboard,
+            copyToClipboard: settings.copyToClipboard || forceClipboard,
+            targetProcessID: targetProcessID,
+            completion: { [weak self] in
+                guard let self else { return }
+                self.pendingTranscriptDeliveries -= 1
+                self.resumeDictationAfterDelivery()
+                self.scheduleAutomaticUpdatePrompt()
+            }
         )
         settings.playFeedback()
-        scheduleDismiss(after: 0.42)
+        scheduleDismiss(after: forceClipboard ? 3 : 0.42)
     }
 
     private func scheduleDismiss(after delay: TimeInterval) {
         dismissWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.dismissNow() }
+        let generation = panel.presentationGeneration
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.panel.presentationGeneration == generation else { return }
+            self.dismissNow()
+        }
         dismissWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
@@ -931,10 +959,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `.idle` renders as the listening state.
     private func dismissNow() {
         dismissWork?.cancel()
+        dismissWork = nil
         panel.dismiss { [weak self] in
             guard let self else { return }
             self.state.phase = .idle
             self.state.reset()
+            self.scheduleAutomaticUpdatePrompt()
         }
     }
 }

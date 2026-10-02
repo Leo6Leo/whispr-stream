@@ -2,9 +2,8 @@ import SwiftUI
 
 /// The floating dictation HUD.
 ///
-/// Warm-up uses a compact square so it reads as a transient startup state.
-/// Active dictation keeps the horizontal capsule: animated waveform on the
-/// left, live transcript on the right.
+/// Active dictation uses a horizontal capsule: animated waveform on the left,
+/// live transcript on the right. Model startup stays in the background.
 struct HUDView: View {
     @ObservedObject var state: AppState
     let onDragChanged: () -> Void
@@ -31,19 +30,13 @@ struct HUDView: View {
     /// full width would strand ~29pt of dead space on either side of it.
     private var leadingWidth: CGFloat {
         switch state.phase {
-        case .ready, .inserted, .failed: return 24                      // glyph
+        case .inserted, .failed: return 24                              // glyph
         case .thinking: return 3 * 7 + 2 * 7                            // dots + gaps
         default: return waveformWidth
         }
     }
 
-    private var isWarmupPhase: Bool {
-        state.phase == .loading || state.phase == .ready
-    }
-
-    private var surfaceCornerRadius: CGFloat {
-        isWarmupPhase ? 29 : 24
-    }
+    private let surfaceCornerRadius: CGFloat = 24
 
     var body: some View {
         hudContent
@@ -98,45 +91,15 @@ struct HUDView: View {
         }
     }
 
-    @ViewBuilder
     private var hudContent: some View {
-        if isWarmupPhase {
-            warmupContent
-        } else {
-            HStack(spacing: 14) {
-                leading
-                    .frame(width: leadingWidth, height: barMaxHeight)
+        HStack(spacing: 14) {
+            leading
+                .frame(width: leadingWidth, height: barMaxHeight)
 
-                label
-            }
-            .padding(.horizontal, 22)
-            .padding(.vertical, 17)
+            label
         }
-    }
-
-    private var warmupContent: some View {
-        VStack(spacing: 15) {
-            ZStack {
-                if state.phase == .loading {
-                    WarmupSpinner()
-                        .transition(.scale(scale: 0.72).combined(with: .opacity))
-                } else {
-                    Image(systemName: "checkmark.circle")
-                        .font(.system(size: 28, weight: .medium))
-                        .foregroundStyle(Color(red: 0.39, green: 0.87, blue: 0.76))
-                        .symbolEffect(.bounce, options: .speed(1.8), value: state.phase)
-                        .transition(.scale(scale: 0.58).combined(with: .opacity))
-                        .accessibilityHidden(true)
-                }
-            }
-            .frame(width: 30, height: 30)
-
-            Text(state.phase == .ready ? "Ready" : "Warming up…")
-                .font(.system(size: 14, weight: .medium, design: .rounded))
-                .foregroundStyle(.secondary)
-                .contentTransition(.opacity)
-        }
-        .frame(width: 120, height: 120)
+        .padding(.horizontal, 22)
+        .padding(.vertical, 17)
     }
 
     // MARK: - Right hand side
@@ -159,7 +122,7 @@ struct HUDView: View {
 
     @ViewBuilder
     private var labelText: some View {
-        if !state.displayText.isEmpty {
+        if !state.displayText.isEmpty && !isShowingFailure {
             transcript
                 .transition(.opacity)
         } else {
@@ -171,10 +134,13 @@ struct HUDView: View {
         }
     }
 
+    private var isShowingFailure: Bool {
+        if case .failed = state.phase { return true }
+        return false
+    }
+
     private var placeholder: String {
         switch state.phase {
-        case .loading: return "Warming up…"
-        case .ready: return "Ready"
         case .thinking: return "Transcribing…"
         case .failed(let message): return message
         default: return "Listening…"
@@ -199,11 +165,6 @@ struct HUDView: View {
     @ViewBuilder
     private var leading: some View {
         switch state.phase {
-        case .ready:
-            Image(systemName: "checkmark.circle")
-                .font(.system(size: 23, weight: .semibold))
-                .foregroundStyle(Color(red: 0.39, green: 0.87, blue: 0.76))
-                .transition(.scale(scale: 0.35).combined(with: .opacity))
         case .inserted:
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 23, weight: .semibold))
@@ -247,39 +208,6 @@ struct HUDView: View {
         let taper = sin(position * .pi)
         let scaled = value * barMaxHeight * CGFloat(0.5 + 0.5 * taper)
         return max(barWidth, scaled)   // never thinner than a dot
-    }
-}
-
-/// A fixed-length arc whose angular velocity changes continuously. The
-/// periodic sine curve has matching, non-zero speed at both ends of each lap,
-/// avoiding the hitch caused by restarting an eased animation at zero speed.
-private struct WarmupSpinner: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    private let cycleDuration: TimeInterval = 0.86
-    private let speedVariation = 0.68
-
-    var body: some View {
-        TimelineView(.animation(paused: reduceMotion)) { timeline in
-            Circle()
-                .trim(from: 0, to: 0.24)
-                .stroke(
-                    Color.accentColor,
-                    style: StrokeStyle(lineWidth: 2.35, lineCap: .round)
-                )
-                .rotationEffect(.degrees(rotation(at: timeline.date)))
-        }
-        .frame(width: 25, height: 25)
-        .accessibilityHidden(true)
-    }
-
-    private func rotation(at date: Date) -> Double {
-        guard !reduceMotion else { return -90 }
-        let elapsed = date.timeIntervalSinceReferenceDate
-        let progress = elapsed.truncatingRemainder(dividingBy: cycleDuration) / cycleDuration
-        let radians = 2 * Double.pi * progress
-        let eased = progress - speedVariation / (2 * Double.pi) * sin(radians)
-        return eased * 360 - 90
     }
 }
 

@@ -2,6 +2,19 @@
 
 WhisprStream is a free, open-source menu-bar dictation app for Apple-silicon Macs. It requires macOS 14 or later and approximately 4 GB free for the app, private speech engine, and recommended Qwen3-ASR 0.6B model.
 
+## Install with Homebrew
+
+```bash
+brew install --cask Leo6Leo/tap/whispr-stream
+```
+
+The custom Cask verifies the app archive against a version-specific SHA-256 and
+removes `com.apple.quarantine` only from the installed `WhisprStream.app`. This
+allows the self-signed, non-notarized build to launch without **Open Anyway**;
+it does not disable Gatekeeper or change its system-wide policy. Review the
+[Cask source](Casks/whispr-stream.rb) before installing if you want to inspect
+the exact command.
+
 ## Download and open
 
 1. Open [GitHub Releases](https://github.com/Leo6Leo/whispr-stream/releases) and download `WhisprStream-macos-arm64.zip` from the latest published release.
@@ -23,7 +36,7 @@ The app checks available storage before either download and checks again before 
 
 ## Experimental optional models
 
-Custom-model support is not available in the public 1.0.2 app. It remains behind a compile-time gate while its validation and runtime packaging are completed. The two built-in Qwen3-ASR choices remain available normally.
+Custom-model support is not available in the public 1.0.3 app. It remains behind a compile-time gate while its validation and runtime packaging are completed. The two built-in Qwen3-ASR choices remain available normally.
 
 Local source builds enable the experiment by default. In those builds, open **Settings → Model → Add Custom Model…**. Custom entries can use a Hugging Face model id or an existing local folder:
 
