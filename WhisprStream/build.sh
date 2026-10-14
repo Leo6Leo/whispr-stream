@@ -9,8 +9,8 @@ cd "$(dirname "$0")"
 PROJECT_ROOT="$(cd .. && pwd)"
 PYTHON="${PYTHON:-$PROJECT_ROOT/.venv/bin/python}"
 APP="${APP:-$PROJECT_ROOT/WhisprStream.app}"
-VERSION="${VERSION:-1.0.3}"
-BUILD_NUMBER="${BUILD_NUMBER:-6}"
+VERSION="${VERSION:-1.0.4}"
+BUILD_NUMBER="${BUILD_NUMBER:-7}"
 RELEASE="${RELEASE:-0}"
 ENABLE_MEETINGS="${ENABLE_MEETINGS:-0}"
 ENABLE_OPTIONAL_MODELS="${ENABLE_OPTIONAL_MODELS:-}"
@@ -43,7 +43,7 @@ SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
 # This branch ships dictation only. Reject an experimental Meetings build
 # before compiling or replacing an existing app bundle.
 if [ "$ENABLE_MEETINGS" != "0" ]; then
-    echo "error: Meeting Notes are unavailable in 1.0.3; ENABLE_MEETINGS must be 0" >&2
+    echo "error: Meeting Notes are unavailable in 1.0.4; ENABLE_MEETINGS must be 0" >&2
     exit 1
 fi
 

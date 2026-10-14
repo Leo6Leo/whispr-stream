@@ -249,6 +249,8 @@ private struct GeneralTab: View {
                     .font(.callout)
             }
 
+            AudioSourceSection(settings: settings)
+
             Section("Output") {
                 Toggle(isOn: $settings.autoInsert) {
                     Text("Insert at cursor")
@@ -319,6 +321,55 @@ private struct GeneralTab: View {
 }
 
 // MARK: - Model
+
+private struct AudioSourceSection: View {
+    @ObservedObject var settings: Settings
+    @State private var hasScreenCaptureAccess = CGPreflightScreenCaptureAccess()
+
+    var body: some View {
+        Section {
+            Picker("Listen to", selection: $settings.audioSource) {
+                ForEach(AudioSource.allCases) { source in
+                    Text(source.label).tag(source)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            if settings.audioSource == .systemAudio {
+                LabeledContent {
+                    if hasScreenCaptureAccess {
+                        Label("Granted", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                            .font(.callout)
+                    } else {
+                        Button("Grant Access") {
+                            // Prompts once; afterwards macOS only allows the
+                            // switch in System Settings.
+                            if !CGRequestScreenCaptureAccess() {
+                                SystemAudioCapture.openSettings()
+                            }
+                            hasScreenCaptureAccess = CGPreflightScreenCaptureAccess()
+                        }
+                    }
+                } label: {
+                    Text("Screen & System Audio Recording")
+                    Text("macOS routes system audio through this permission. No screen image is kept.")
+                }
+                .transition(.opacity)
+            }
+        } header: {
+            Text("Audio source")
+        } footer: {
+            Text(settings.audioSource.detail + " Press ⌥S while dictating to switch sources.")
+                .foregroundStyle(.secondary)
+                .font(.callout)
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: settings.audioSource)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            hasScreenCaptureAccess = CGPreflightScreenCaptureAccess()
+        }
+    }
+}
 
 private struct ModelTab: View {
     @ObservedObject var settings: Settings

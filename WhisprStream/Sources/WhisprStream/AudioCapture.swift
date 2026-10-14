@@ -166,14 +166,16 @@ final class AudioCapture {
         let count = Int(out.frameLength)
         let samples = UnsafeBufferPointer(start: channel[0], count: count)
 
-        // RMS on the converted samples, mapped to a perceptually useful 0...1.
+        let data = Data(buffer: samples)
+        onBuffer?(data, Self.level(of: samples))
+    }
+
+    /// RMS on converted samples, mapped to a perceptually useful 0...1.
+    static func level(of samples: UnsafeBufferPointer<Int16>) -> Float {
         var sum: Double = 0
         for s in samples { let v = Double(s) / 32768.0; sum += v * v }
-        let rms = (sum / Double(max(count, 1))).squareRoot()
-        let level = Float(min(1.0, max(0.0, (rms * 12).squareRoot())))
-
-        let data = Data(buffer: samples)
-        onBuffer?(data, level)
+        let rms = (sum / Double(max(samples.count, 1))).squareRoot()
+        return Float(min(1.0, max(0.0, (rms * 12).squareRoot())))
     }
 
     private enum CaptureError: LocalizedError {

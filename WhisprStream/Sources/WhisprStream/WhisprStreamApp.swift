@@ -89,6 +89,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var periodicUpdateTimer: Timer?
     private var initialUpdateCheckWork: DispatchWorkItem?
     private let capture = AudioCapture()
+    private let systemCapture = SystemAudioCapture()
+    private let sourceToggleTap = SourceToggleKeyTap()
     private var hotkey: HotKeyMonitor!
     private var asr: ASRService!
     private var dismissWork: DispatchWorkItem?
@@ -189,7 +191,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         initialUpdateCheckWork?.cancel()
         periodicUpdateTimer?.invalidate()
         updateStatusObservation?.cancel()
-        capture.stop()
+        stopCapture()
         state.stopDictationTimer()
         hotkey?.stop()
         speechEngineStartupWork?.cancel()
@@ -347,17 +349,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         CorrectionStore.shared.onChange = { [weak self] in self?.refreshLearnedContext() }
         settings.onModelChange = { [weak self] _ in self?.reloadASR() }
         settings.onShortUtteranceLanguageChange = { [weak self] _ in self?.reloadASR() }
-        capture.onBuffer = { [weak self] pcm, level in
+        let onBuffer: (Data, Float) -> Void = { [weak self] pcm, level in
             self?.asr?.sendAudio(pcm)
             DispatchQueue.main.async {
                 guard let self, self.state.phase == .listening else { return }
                 self.state.level = self.state.level * 0.55 + CGFloat(level) * 0.45
             }
         }
+        capture.onBuffer = onBuffer
+        systemCapture.onBuffer = onBuffer
         capture.onFailure = { [weak self] error in
             guard let self, self.state.phase == .listening else { return }
             Log.write("microphone capture stopped: \(error.localizedDescription)")
             self.failSpeechEngine("Microphone unavailable")
+        }
+        sourceToggleTap.onToggle = { [weak self] in self?.toggleAudioSource() }
+        systemCapture.onFailure = { [weak self] error in
+            guard let self, self.state.phase == .listening else { return }
+            Log.write("system audio capture stopped: \(error.localizedDescription)")
+            self.failSpeechEngine("System audio unavailable")
         }
 
         do {
@@ -455,7 +465,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // Reload in the background, reporting progress only in Settings.
         if state.phase == .listening {
-            capture.stop()
+            stopCapture()
             state.stopDictationTimer()
             state.level = 0
             cancelCursorContextResolution()
@@ -643,7 +653,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         asr.beginUtterance(shortUtteranceLanguage: shortLanguage)
         do {
-            try capture.start()
+            try startCapture()
             // Accessibility is instantaneous when an editor exposes its text.
             // For other apps, run the guarded keyboard fallback while the user
             // is speaking so its clipboard waits are off the critical path.
@@ -659,9 +669,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// System audio starts asynchronously and reports problems through
+    /// `onFailure`; only the microphone can fail synchronously here.
+    private func startCapture() throws {
+        switch settings.audioSource {
+        case .microphone: try capture.start()
+        case .systemAudio: systemCapture.start()
+        }
+        sourceToggleTap.setEnabled(true)
+    }
+
+    private func stopCapture() {
+        sourceToggleTap.setEnabled(false)
+        capture.stop()
+        systemCapture.stop()
+    }
+
+    /// ⌥S while listening. Both sources feed the same utterance, so the
+    /// transcript continues across the switch; the HUD's rainbow tint follows
+    /// `settings.audioSource`. The choice persists for the next dictation.
+    private func toggleAudioSource() {
+        guard state.phase == .listening else { return }
+        let next: AudioSource = settings.audioSource == .microphone ? .systemAudio : .microphone
+        settings.audioSource = next
+        Log.write("audio source switched mid-dictation to \(next.rawValue)")
+        switch next {
+        case .systemAudio:
+            capture.stop()
+            systemCapture.start()
+        case .microphone:
+            systemCapture.stop()
+            do {
+                try capture.start()
+            } catch {
+                failSpeechEngine("Microphone unavailable")
+            }
+        }
+    }
+
     private func endDictation() {
         guard state.phase == .listening else { return }
-        capture.stop()
+        stopCapture()
         state.stopDictationTimer()
         state.level = 0
         state.phase = .thinking
@@ -713,7 +761,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func failSpeechEngine(_ message: String) {
         // Stop hardware before leaving .listening: key release and the safety
         // timer can no longer own cleanup once the UI has entered .failed.
-        capture.stop()
+        stopCapture()
         hotkey?.cancelActiveDictation()
         state.stopDictationTimer()
         state.level = 0

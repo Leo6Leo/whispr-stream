@@ -6,6 +6,8 @@ import SwiftUI
 /// live transcript on the right. Model startup stays in the background.
 struct HUDView: View {
     @ObservedObject var state: AppState
+    @ObservedObject private var settings = Settings.shared
+    @Environment(\.colorScheme) private var colorScheme
     let onDragChanged: () -> Void
     let onDragEnded: () -> Void
 
@@ -38,6 +40,16 @@ struct HUDView: View {
 
     private let surfaceCornerRadius: CGFloat = 24
 
+    /// Rainbow is the system-audio indicator, not decoration: it tells the
+    /// user the Mac's output, not their voice, is being transcribed.
+    private var isRainbow: Bool { settings.audioSource == .systemAudio }
+
+    /// Drives the hue drift. Paused outside active phases so an idle HUD
+    /// costs nothing.
+    private var isAnimatingRainbow: Bool {
+        isRainbow && (state.phase == .listening || state.phase == .thinking)
+    }
+
     var body: some View {
         hudContent
         .background {
@@ -47,15 +59,7 @@ struct HUDView: View {
                     RoundedRectangle(cornerRadius: surfaceCornerRadius, style: .continuous)
                         .fill(Color.orange.opacity(state.isApproachingDictationLimit ? 0.18 : 0))
                 }
-                .overlay {
-                    RoundedRectangle(cornerRadius: surfaceCornerRadius, style: .continuous)
-                        .strokeBorder(
-                            state.isApproachingDictationLimit
-                                ? Color.orange.opacity(0.72)
-                                : Color.primary.opacity(0.07),
-                            lineWidth: state.isApproachingDictationLimit ? 1.2 : 0.5
-                        )
-                }
+                .overlay { border }
         }
         // Flatten before shadowing: a shadow applied straight to a material
         // fill renders behind the blur and muddies the panel instead of
@@ -82,6 +86,7 @@ struct HUDView: View {
         .animation(.spring(response: 0.30, dampingFraction: 0.85), value: state.displayText)
         .animation(.spring(response: 0.26, dampingFraction: 0.72), value: state.phase)
         .animation(.easeInOut(duration: 0.2), value: state.isApproachingDictationLimit)
+        .animation(.easeInOut(duration: 0.35), value: settings.audioSource)
         .onAppear { history = Array(repeating: 0, count: barCount) }
         .onChange(of: state.level) { _, new in
             var next = history
@@ -100,6 +105,31 @@ struct HUDView: View {
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 17)
+    }
+
+    @ViewBuilder
+    private var border: some View {
+        let shape = RoundedRectangle(cornerRadius: surfaceCornerRadius, style: .continuous)
+        if state.isApproachingDictationLimit {
+            shape.strokeBorder(Color.orange.opacity(0.72), lineWidth: 1.2)
+        } else if isRainbow {
+            TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !isAnimatingRainbow)) { context in
+                let phase = RainbowPalette.phase(at: context.date)
+                shape.strokeBorder(
+                    AngularGradient(
+                        colors: RainbowPalette.stops(phase: phase, span: 1, count: 7) {
+                            RainbowPalette.accent(hue: $0, scheme: colorScheme)
+                        },
+                        center: .center,
+                        angle: .degrees(phase * 360)
+                    ),
+                    lineWidth: 1
+                )
+                .opacity(colorScheme == .dark ? 0.55 : 0.45)
+            }
+        } else {
+            shape.strokeBorder(Color.primary.opacity(0.07), lineWidth: 0.5)
+        }
     }
 
     // MARK: - Right hand side
@@ -143,14 +173,14 @@ struct HUDView: View {
         switch state.phase {
         case .thinking: return "Transcribing…"
         case .failed(let message): return message
-        default: return "Listening…"
+        default:
+            return settings.audioSource == .systemAudio ? "Listening to system audio…" : "Listening…"
         }
     }
 
     private var transcript: some View {
         HStack(spacing: 0) {
-            Text(state.committed)
-                .foregroundStyle(.primary)
+            committedText
             Text(state.tail)
                 .foregroundStyle(.secondary)
         }
@@ -158,6 +188,30 @@ struct HUDView: View {
         .lineLimit(1)
         .truncationMode(.head)
         .frame(maxWidth: 540, alignment: .leading)
+    }
+
+    /// The settled words carry the color; the changing tail stays
+    /// `.secondary` so the sentence still visibly settles.
+    @ViewBuilder
+    private var committedText: some View {
+        if isRainbow {
+            TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !isAnimatingRainbow)) { context in
+                let phase = RainbowPalette.phase(at: context.date)
+                Text(state.committed)
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: RainbowPalette.stops(phase: phase, span: 0.55) {
+                                RainbowPalette.text(hue: $0, scheme: colorScheme)
+                            },
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+            }
+        } else {
+            Text(state.committed)
+                .foregroundStyle(.primary)
+        }
     }
 
     // MARK: - Leading indicator
@@ -177,7 +231,9 @@ struct HUDView: View {
                 .foregroundStyle(.orange)
                 .transition(.scale(scale: 0.3).combined(with: .opacity))
         case .thinking:
-            ThinkingDots()
+            ThinkingDots(colors: isRainbow
+                ? [0.0, 0.33, 0.62].map { RainbowPalette.accent(hue: $0, scheme: colorScheme) }
+                : Array(repeating: Color.accentColor, count: 3))
                 .transition(.opacity)
         default:
             waveform
@@ -186,18 +242,29 @@ struct HUDView: View {
     }
 
     private var waveform: some View {
-        HStack(alignment: .center, spacing: barSpacing) {
-            ForEach(0..<barCount, id: \.self) { index in
-                Capsule(style: .continuous)
-                    .fill(Color.accentColor.opacity(0.9))
-                    .frame(width: barWidth, height: height(at: index))
-                    .animation(
-                        .spring(response: 0.28, dampingFraction: 0.62),
-                        value: height(at: index)
-                    )
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !isAnimatingRainbow)) { context in
+            let phase = RainbowPalette.phase(at: context.date)
+            HStack(alignment: .center, spacing: barSpacing) {
+                ForEach(0..<barCount, id: \.self) { index in
+                    Capsule(style: .continuous)
+                        .fill(barColor(at: index, phase: phase))
+                        .frame(width: barWidth, height: height(at: index))
+                        .animation(
+                            .spring(response: 0.28, dampingFraction: 0.62),
+                            value: height(at: index)
+                        )
+                }
             }
         }
         .frame(width: waveformWidth, height: barMaxHeight)
+    }
+
+    /// The bars span ~60% of the wheel so neighbours blend instead of
+    /// striping red-next-to-violet.
+    private func barColor(at index: Int, phase: Double) -> Color {
+        guard isRainbow else { return Color.accentColor.opacity(0.9) }
+        let hue = phase + 0.6 * Double(index) / Double(barCount - 1)
+        return RainbowPalette.accent(hue: hue, scheme: colorScheme).opacity(0.95)
     }
 
     private func height(at index: Int) -> CGFloat {
@@ -213,13 +280,14 @@ struct HUDView: View {
 
 /// Three dots pulsing in sequence while the final pass decodes.
 private struct ThinkingDots: View {
+    let colors: [Color]
     @State private var animating = false
 
     var body: some View {
         HStack(spacing: 7) {
             ForEach(0..<3, id: \.self) { i in
                 Circle()
-                    .fill(Color.accentColor)
+                    .fill(colors[i])
                     .frame(width: 7, height: 7)
                     .scaleEffect(animating ? 1.0 : 0.45)
                     .opacity(animating ? 1.0 : 0.4)

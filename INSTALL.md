@@ -36,7 +36,7 @@ The app checks available storage before either download and checks again before 
 
 ## Experimental optional models
 
-Custom-model support is not available in the public 1.0.3 app. It remains behind a compile-time gate while its validation and runtime packaging are completed. The two built-in Qwen3-ASR choices remain available normally.
+Custom-model support is not available in the public 1.0.4 app. It remains behind a compile-time gate while its validation and runtime packaging are completed. The two built-in Qwen3-ASR choices remain available normally.
 
 Local source builds enable the experiment by default. In those builds, open **Settings → Model → Add Custom Model…**. Custom entries can use a Hugging Face model id or an existing local folder:
 
