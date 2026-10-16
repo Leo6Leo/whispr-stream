@@ -195,8 +195,15 @@ Recording:
 - Press ⌥S mid-dictation in both directions. The source and rainbow tint must
   switch without restarting the utterance, ⌥S must not type "ß" into the
   editor, and ⌥S must type normally again once dictation ends.
-- With permission denied, a system-audio dictation must fail with "System
-  audio unavailable" and the next microphone dictation must still work.
+- With permission denied and **System audio** selected, the shortcut must not
+  start recording: the HUD must show "System audio needs Screen & System Audio
+  Recording" and Settings must open on the Permissions tab, with no system
+  prompt. Pressing ⌥S from a microphone dictation without the grant must keep
+  recording on the microphone and show an orange notice in the HUD naming the
+  grant, without opening any window. Revoking the grant in System Settings
+  while a system-audio dictation is live must end it with "System audio
+  unavailable". After each case, switching back to **Microphone** must dictate
+  normally.
 
 Also exercise these dictation regressions with the built candidate:
 

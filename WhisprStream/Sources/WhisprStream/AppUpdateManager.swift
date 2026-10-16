@@ -176,8 +176,10 @@ final class AppUpdateManager: ObservableObject {
                 try await Self.stageAndLaunchInstaller(
                     prepared: prepared,
                     targetApp: self.appBundleURL,
-                    helperSource: self.appBundleURL
-                        .appendingPathComponent("Contents/Helpers/WhisprStreamUpdateInstaller")
+                    helperSource: Self.installerHelperSource(
+                        preparedApp: prepared.app,
+                        currentApp: self.appBundleURL
+                    )
                 )
                 Log.write("update: verified version \(release.version); terminating for replacement")
                 NSApp.terminate(nil)
@@ -590,6 +592,33 @@ final class AppUpdateManager: ObservableObject {
     }
 
     // MARK: - Replacement handoff
+
+    private static let installerHelperPath = "Contents/Helpers/WhisprStreamUpdateInstaller"
+
+    /// The update helper to run: the one shipped inside the verified
+    /// replacement, falling back to the installed app's own copy.
+    ///
+    /// The helper performs the relaunch, so fixes to the handoff (such as
+    /// launching the new app through LaunchServices so TCC credits it with its
+    /// own microphone and accessibility grants) only help if the helper that
+    /// runs is the NEW one. The prepared bundle has already passed the pinned
+    /// Ed25519 archive signature and bundle validation, and its main
+    /// executable is about to be run as the user anyway, so its helper is no
+    /// less trusted than the installed one.
+    nonisolated static func installerHelperSource(
+        preparedApp: URL,
+        currentApp: URL,
+        fileManager: FileManager = .default
+    ) -> URL {
+        let staged = preparedApp.appendingPathComponent(installerHelperPath)
+        if let values = try? staged.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+           values.isRegularFile == true,
+           values.isSymbolicLink != true,
+           fileManager.isExecutableFile(atPath: staged.path) {
+            return staged
+        }
+        return currentApp.appendingPathComponent(installerHelperPath)
+    }
 
     nonisolated static func stageAndLaunchInstaller(
         prepared: PreparedUpdate,

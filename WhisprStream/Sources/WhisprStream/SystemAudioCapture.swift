@@ -46,13 +46,6 @@ final class SystemAudioCapture: NSObject {
     /// Called on the main queue when the stream cannot start or stops early.
     var onFailure: ((Error) -> Void)?
 
-    static func openSettings() {
-        guard let url = URL(
-            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
-        ) else { return }
-        NSWorkspace.shared.open(url)
-    }
-
     /// Returns immediately; the stream comes up asynchronously (~100–200 ms).
     func start() {
         stopStream()

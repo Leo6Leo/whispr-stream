@@ -486,7 +486,7 @@ enum TextInserter {
     /// The system-wide focused-element query is not reliable for every app.
     /// Chromium/Electron and some sandboxed apps can reject it while still
     /// exposing the same element from their application Accessibility root.
-    private static func focusedTextElement() -> AXUIElement? {
+    static func focusedTextElement() -> AXUIElement? {
         let systemWide = AXUIElementCreateSystemWide()
         if let focused = focusedElement(from: systemWide) {
             return focused

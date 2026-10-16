@@ -2,7 +2,12 @@ import AVFoundation
 import AppKit
 import SwiftUI
 
-/// Live view of the two permissions the app needs.
+/// Live view of the permissions the app uses.
+///
+/// Microphone and Accessibility are required for dictation. Screen & System
+/// Audio Recording is optional: macOS routes system audio through it, so it
+/// only matters while "System audio" is the selected source, and onboarding
+/// never asks for it.
 ///
 /// macOS never notifies an app that a permission changed, so onboarding polls.
 /// Accessibility in particular only re-reads as granted after the user flips the
@@ -11,17 +16,25 @@ import SwiftUI
 final class Permissions: ObservableObject {
     @Published private(set) var microphone: AVAuthorizationStatus = .notDetermined
     @Published private(set) var accessibility: Bool = false
+    @Published private(set) var screenCapture: Bool = false
 
     private var timer: Timer?
 
     init() { refresh() }
 
+    /// The required pair. Screen capture is deliberately left out: microphone
+    /// dictation works without it.
     var allGranted: Bool { microphone == .authorized && accessibility }
+
+    /// Preflight only; never prompts. For call sites with no reason to hold a
+    /// live `Permissions` object, such as the dictation start path.
+    static var isScreenCaptureGranted: Bool { CGPreflightScreenCaptureAccess() }
 
     func refresh() {
         microphone = AVCaptureDevice.authorizationStatus(for: .audio)
-        // Never prompt from a poll — the prompt is triggered explicitly below.
+        // Never prompt from a poll — the prompts are triggered explicitly below.
         accessibility = AXIsProcessTrusted()
+        screenCapture = Self.isScreenCaptureGranted
     }
 
     /// Polls while onboarding is on screen so cards update the moment a
@@ -66,8 +79,20 @@ final class Permissions: ObservableObject {
         refresh()
     }
 
+    /// Shows the system Screen & System Audio Recording prompt. macOS shows it
+    /// once; after that only the switch in System Settings can change the
+    /// answer, so fall through to opening the pane directly.
+    func requestScreenCapture() {
+        refresh()
+        guard !screenCapture else { return }
+        if !CGRequestScreenCaptureAccess() {
+            openSettings(.screenCapture)
+        }
+        refresh()
+    }
+
     enum Pane {
-        case microphone, accessibility
+        case microphone, accessibility, screenCapture
 
         var url: URL {
             switch self {
@@ -75,6 +100,8 @@ final class Permissions: ObservableObject {
                 return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!
             case .accessibility:
                 return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+            case .screenCapture:
+                return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
             }
         }
     }

@@ -298,6 +298,58 @@ final class AppUpdateManagerTests: XCTestCase {
         ))
     }
 
+    func testInstallerHelperComesFromReplacementWhenItShipsOne() throws {
+        let manager = FileManager.default
+        let directory = manager.temporaryDirectory
+            .appendingPathComponent("WhisprStreamHelperTests-\(UUID().uuidString)")
+        defer { try? manager.removeItem(at: directory) }
+        let helperPath = "Contents/Helpers/WhisprStreamUpdateInstaller"
+        let current = directory.appendingPathComponent("Installed/WhisprStream.app")
+        let prepared = directory.appendingPathComponent("Prepared/WhisprStream.app")
+        for app in [current, prepared] {
+            try manager.createDirectory(
+                at: app.appendingPathComponent("Contents/Helpers"),
+                withIntermediateDirectories: true
+            )
+        }
+        let currentHelper = current.appendingPathComponent(helperPath)
+        let preparedHelper = prepared.appendingPathComponent(helperPath)
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: currentHelper)
+        try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: currentHelper.path)
+
+        // No helper in the replacement: keep using the installed app's copy.
+        XCTAssertEqual(
+            AppUpdateManager.installerHelperSource(preparedApp: prepared, currentApp: current),
+            currentHelper
+        )
+
+        // A non-executable file in the replacement is not a usable helper.
+        try Data("not a helper".utf8).write(to: preparedHelper)
+        try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: preparedHelper.path)
+        XCTAssertEqual(
+            AppUpdateManager.installerHelperSource(preparedApp: prepared, currentApp: current),
+            currentHelper
+        )
+
+        // A symlink is not accepted even when it points at an executable.
+        try manager.removeItem(at: preparedHelper)
+        try manager.createSymbolicLink(at: preparedHelper, withDestinationURL: currentHelper)
+        XCTAssertEqual(
+            AppUpdateManager.installerHelperSource(preparedApp: prepared, currentApp: current),
+            currentHelper
+        )
+
+        // The replacement's own executable helper wins, so handoff fixes in the
+        // new version apply to the update that installs it.
+        try manager.removeItem(at: preparedHelper)
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: preparedHelper)
+        try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: preparedHelper.path)
+        XCTAssertEqual(
+            AppUpdateManager.installerHelperSource(preparedApp: prepared, currentApp: current),
+            preparedHelper
+        )
+    }
+
     func testReplacementBundleMustKeepIdentityVersionKeyAndExecutable() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("WhisprStreamBundleTests-\(UUID().uuidString)")

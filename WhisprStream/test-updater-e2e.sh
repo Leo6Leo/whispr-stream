@@ -106,6 +106,12 @@ assert_equal 9.9.9 "$(bundle_value "$SUCCESS_TARGET" CFBundleShortVersionString)
 assert_equal 0 "$(find "$SUCCESS_ROOT" -maxdepth 1 -name '.WhisprStream.update-backup-*.app' | wc -l | tr -d ' ')" \
     "the successful update left a backup"
 [ ! -e "$SUCCESS_HELPER_ROOT" ] || fail "the successful update left its helper directory"
+# The relaunched app must own its TCC grants: it has to be launched through
+# LaunchServices (its own responsible process), not as a child of the helper.
+[ -f "$SUCCESS_ROOT/launch-identity" ] || fail "the relaunched app did not record its launch identity"
+read -r LAUNCHED_PID LAUNCHED_RESPONSIBLE < "$SUCCESS_ROOT/launch-identity"
+assert_equal "$LAUNCHED_PID" "$LAUNCHED_RESPONSIBLE" \
+    "the relaunched app is not its own responsible process (TCC would charge the old app)"
 
 echo "[2/4] Missing replacement executable restores the previous version"
 ROLLBACK_ROOT="$TEST_ROOT/rollback"

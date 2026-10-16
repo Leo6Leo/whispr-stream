@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import Foundation
 
@@ -156,19 +157,107 @@ private func relaunch(_ app: URL) -> Bool {
     }
 }
 
-private func stop(_ process: Process) {
-    guard process.isRunning else { return }
-    process.terminate()
-    let deadline = Date().addingTimeInterval(2)
-    while process.isRunning, Date() < deadline {
-        Thread.sleep(forTimeInterval: 0.05)
-    }
-    if process.isRunning {
-        kill(process.processIdentifier, SIGKILL)
-    }
-    process.waitUntilExit()
+/// Every signal in this file goes through these two helpers, which refuse any
+/// pid that does not name exactly one process. `kill(-1, sig)` signals every
+/// process the user owns and `kill(0, sig)` the whole process group, and
+/// `NSRunningApplication.processIdentifier` is -1 for an app that already
+/// exited, so an unguarded pid here once terminated the user's entire session.
+private func isSinglePID(_ pid: pid_t) -> Bool {
+    pid > 1
 }
 
+private func isRunning(_ pid: pid_t) -> Bool {
+    guard isSinglePID(pid) else { return false }
+    errno = 0
+    if kill(pid, 0) == 0 { return true }
+    return errno != ESRCH
+}
+
+private func stop(_ pid: pid_t) {
+    guard isSinglePID(pid), isRunning(pid) else { return }
+    kill(pid, SIGTERM)
+    let deadline = Date().addingTimeInterval(2)
+    while isRunning(pid), Date() < deadline {
+        Thread.sleep(forTimeInterval: 0.05)
+    }
+    if isRunning(pid) {
+        kill(pid, SIGKILL)
+    }
+}
+
+/// The kernel's view of a path, for comparison with `proc_pidpath` output.
+/// Foundation's `resolvingSymlinksInPath()` strips `/private`, which the kernel
+/// keeps, so it cannot be used here.
+private func canonicalPath(_ url: URL) -> String {
+    guard let resolved = realpath(url.path, nil) else { return url.standardizedFileURL.path }
+    defer { free(resolved) }
+    return String(cString: resolved)
+}
+
+/// Process identifiers of every running process whose executable is `executable`.
+///
+/// LaunchServices only reports a pid for apps that check in with it (AppKit
+/// apps); for anything else `NSRunningApplication.processIdentifier` is -1, so
+/// the helper identifies the new instance by its executable path instead. The
+/// previous instance has already exited by the time this runs, so any process
+/// running the installed executable is the one this helper launched.
+private func processIDs(runningExecutable executable: URL) -> [pid_t] {
+    let target = canonicalPath(executable)
+    let needed = proc_listallpids(nil, 0)
+    guard needed > 0 else { return [] }
+    var pids = [pid_t](repeating: 0, count: Int(needed) * 2)
+    let count = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
+    guard count > 0 else { return [] }
+    // PROC_PIDPATHINFO_MAXSIZE, which the Swift Darwin overlay does not export.
+    var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+    return pids.prefix(Int(count)).filter { pid in
+        guard isSinglePID(pid) else { return false }
+        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return false }
+        return String(cString: buffer) == target
+    }
+}
+
+/// What LaunchServices has said so far about a launch it was asked for. Its
+/// completion handler fires only once the app has checked in with
+/// LaunchServices, which for an app that never does (a plain executable in a
+/// bundle) means when the process exits, so callers must not wait for it.
+private final class LaunchServicesReport: @unchecked Sendable {
+    private let lock = NSLock()
+    private var failure: Error?
+    private var reportedPID: pid_t?
+
+    func record(_ running: NSRunningApplication?, _ error: Error?) {
+        lock.lock()
+        defer { lock.unlock() }
+        failure = error
+        if let pid = running?.processIdentifier, isSinglePID(pid) {
+            reportedPID = pid
+        }
+    }
+
+    var failed: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return failure != nil
+    }
+
+    var pid: pid_t? {
+        lock.lock()
+        defer { lock.unlock() }
+        return reportedPID
+    }
+}
+
+/// Launches the app through LaunchServices and confirms it reports a healthy
+/// launch and stays alive for `launchStabilityInterval` afterwards.
+///
+/// The new app must not be spawned as a child of this helper. macOS attributes
+/// privacy permissions (microphone, accessibility) to a process's "responsible
+/// process", which posix_spawn children inherit from their spawner. This helper
+/// was itself spawned by the old WhisprStream, so a child here would be charged
+/// to the old, already-exited pid and the microphone would stay denied until the
+/// user quit and relaunched by hand. LaunchServices makes the new app its own
+/// responsible process, exactly like a launch from Finder or the Dock.
 private func launchAndConfirmHealth(
     _ app: URL,
     healthFile: URL,
@@ -185,41 +274,53 @@ private func launchAndConfirmHealth(
         .appendingPathComponent(executableName, isDirectory: false)
     guard FileManager.default.isExecutableFile(atPath: executable.path) else { return false }
 
-    let process = Process()
-    process.executableURL = executable
-    process.arguments = [
+    let configuration = NSWorkspace.OpenConfiguration()
+    configuration.createsNewApplicationInstance = true
+    configuration.promptsUserIfNeeded = false
+    configuration.arguments = [
         healthFileArgument, healthFile.path,
         healthTokenArgument, token,
     ]
-    process.standardInput = FileHandle.nullDevice
-    process.standardOutput = FileHandle.nullDevice
-    process.standardError = FileHandle.nullDevice
-    do {
-        try process.run()
-    } catch {
-        return false
+    let report = LaunchServicesReport()
+    NSWorkspace.shared.openApplication(at: app, configuration: configuration) { running, error in
+        report.record(running, error)
     }
 
     let deadline = Date().addingTimeInterval(launchHealthTimeout)
+    var pid: pid_t?
     var signalReceivedAt: Date?
+    var healthy = false
     while Date() < deadline {
-        guard process.isRunning else {
-            process.waitUntilExit()
-            return false
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+        if report.failed { break }
+        if pid == nil {
+            pid = report.pid ?? processIDs(runningExecutable: executable).first
         }
+        if let pid, !isRunning(pid) { break }
         if let contents = try? String(contentsOf: healthFile, encoding: .utf8),
            contents == token {
             if signalReceivedAt == nil {
                 signalReceivedAt = Date()
             }
             if Date().timeIntervalSince(signalReceivedAt!) >= launchStabilityInterval {
-                return process.isRunning
+                if pid == nil {
+                    pid = processIDs(runningExecutable: executable).first
+                }
+                if let pid, isRunning(pid) {
+                    healthy = true
+                }
+                break
             }
         }
-        Thread.sleep(forTimeInterval: 0.05)
     }
+    if healthy { return true }
 
-    stop(process)
+    // Leave no half-started new instance behind before the rollback relaunches
+    // the previous version.
+    if let pid { stop(pid) }
+    for stray in processIDs(runningExecutable: executable) {
+        stop(stray)
+    }
     return false
 }
 

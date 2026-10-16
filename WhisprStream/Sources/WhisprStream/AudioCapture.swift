@@ -1,108 +1,169 @@
-import AVFoundation
+import AudioToolbox
+import CoreAudio
+import Foundation
 
 /// Captures the default input and delivers mono 16 kHz Int16 buffers.
 ///
-/// The hardware format is whatever the mic reports (usually 44.1/48 kHz float),
-/// so everything goes through an AVAudioConverter into the format the ASR
-/// sidecar expects.
+/// Built on AudioQueue rather than AVAudioEngine. With AirPods as the input,
+/// `AVAudioEngine.inputNode` blocks for ~3.4 s negotiating a Bluetooth format
+/// before the first sample; AudioQueue delivers its first buffer in ~0.5 s
+/// and converts to the sidecar's 16 kHz Int16 format itself.
 final class AudioCapture {
     private static let recoveryDelay: TimeInterval = 0.25
     private static let maximumRecoveryAttempts = 20
+    /// 100 ms per buffer at 16 kHz Int16 mono.
+    private static let bufferBytes: UInt32 = 3_200
+    private static let bufferCount = 3
 
-    private var engine: AVAudioEngine?
-    private var configurationObserver: NSObjectProtocol?
-    private var recoveryWork: DispatchWorkItem?
+    private static let format = AudioStreamBasicDescription(
+        mSampleRate: 16_000,
+        mFormatID: kAudioFormatLinearPCM,
+        mFormatFlags: kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked,
+        mBytesPerPacket: 2,
+        mFramesPerPacket: 1,
+        mBytesPerFrame: 2,
+        mChannelsPerFrame: 1,
+        mBitsPerChannel: 16,
+        mReserved: 0
+    )
+
+    /// Owns every queue operation so the hotkey handler never waits on the
+    /// audio device. Serial, so a stop always runs after its start.
+    private let controlQueue = DispatchQueue(
+        label: "com.whisprstream.microphone",
+        qos: .userInitiated
+    )
+    private let bufferQueue = DispatchQueue(
+        label: "com.whisprstream.microphone.buffers",
+        qos: .userInitiated
+    )
+    private var queue: AudioQueueRef?
     private var isCapturing = false
-    private let targetFormat = AVAudioFormat(
-        commonFormat: .pcmFormatInt16,
-        sampleRate: 16000,
-        channels: 1,
-        interleaved: true
-    )!
+    private var recoveryWork: DispatchWorkItem?
+    private var defaultInputAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultInputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    private var defaultInputListener: AudioObjectPropertyListenerBlock?
 
     /// Called on an audio thread with converted PCM and a 0...1 level estimate.
     var onBuffer: ((Data, Float) -> Void)?
 
-    /// Called on the main queue when an input route cannot be recovered.
+    /// Called on the main queue when the input cannot start or be recovered.
     var onFailure: ((Error) -> Void)?
 
     init() {
-        configurationObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            self?.handleConfigurationChange(notification)
+        // An AudioQueue stays bound to the device it was created on, so a new
+        // default input (AirPods connecting or leaving) needs a new queue.
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.handleDefaultInputChange()
         }
+        defaultInputListener = listener
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &defaultInputAddress,
+            controlQueue,
+            listener
+        )
     }
 
     deinit {
-        if let configurationObserver {
-            NotificationCenter.default.removeObserver(configurationObserver)
+        if let defaultInputListener {
+            AudioObjectRemovePropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject),
+                &defaultInputAddress,
+                controlQueue,
+                defaultInputListener
+            )
         }
         recoveryWork?.cancel()
+        if let queue {
+            AudioQueueStop(queue, true)
+            AudioQueueDispose(queue, true)
+        }
     }
 
-    func start() throws {
-        recoveryWork?.cancel()
-        isCapturing = true
-        do {
-            try startFreshEngine()
-        } catch {
-            isCapturing = false
-            stopCurrentEngine()
-            throw error
+    /// Returns immediately; failures arrive through `onFailure`.
+    func start() {
+        let requestedAt = Date()
+        controlQueue.async { [self] in
+            recoveryWork?.cancel()
+            isCapturing = true
+            do {
+                try startFreshQueue()
+                let waited = Date().timeIntervalSince(requestedAt)
+                if waited > 0.3 {
+                    Log.write("microphone took \(Int(waited * 1000))ms to start")
+                }
+            } catch {
+                isCapturing = false
+                stopCurrentQueue()
+                Log.write("microphone failed to start: \(error.localizedDescription)")
+                DispatchQueue.main.async { self.onFailure?(error) }
+            }
         }
     }
 
     func stop() {
-        isCapturing = false
-        recoveryWork?.cancel()
-        recoveryWork = nil
-        stopCurrentEngine()
+        controlQueue.async { [self] in
+            isCapturing = false
+            recoveryWork?.cancel()
+            recoveryWork = nil
+            stopCurrentQueue()
+        }
     }
 
-    private func startFreshEngine() throws {
-        stopCurrentEngine()
+    private func startFreshQueue() throws {
+        stopCurrentQueue()
 
-        // A new engine is intentional. After the default device changes, an
-        // existing input node can retain the old device's channel count and
-        // sample rate even after reset(), especially while AirPods are moving
-        // between their playback and headset profiles.
-        let newEngine = AVAudioEngine()
-        let input = newEngine.inputNode
-        let inFormat = input.outputFormat(forBus: 0)
-        guard inFormat.sampleRate > 0, inFormat.channelCount > 0 else {
-            throw CaptureError.inputNotReady
+        var format = Self.format
+        var created: AudioQueueRef?
+        var status = AudioQueueNewInputWithDispatchQueue(
+            &created,
+            &format,
+            0,
+            bufferQueue
+        ) { [weak self] queue, buffer, _, _, _ in
+            self?.handle(buffer.pointee)
+            AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
         }
-        guard let converter = AVAudioConverter(from: inFormat, to: targetFormat) else {
-            throw CaptureError.unsupportedInputFormat
+        guard status == noErr, let created else {
+            throw CaptureError.queueFailed("create", status)
         }
-
-        input.installTap(onBus: 0, bufferSize: 2048, format: inFormat) { [weak self] buf, _ in
-            self?.handle(buf, inFormat: inFormat, converter: converter)
+        for _ in 0..<Self.bufferCount {
+            var buffer: AudioQueueBufferRef?
+            status = AudioQueueAllocateBuffer(created, Self.bufferBytes, &buffer)
+            if status == noErr, let buffer {
+                status = AudioQueueEnqueueBuffer(created, buffer, 0, nil)
+            }
+            guard status == noErr else {
+                AudioQueueDispose(created, true)
+                throw CaptureError.queueFailed("allocate", status)
+            }
         }
-        engine = newEngine
-        newEngine.prepare()
-        try newEngine.start()
+        status = AudioQueueStart(created, nil)
+        guard status == noErr else {
+            AudioQueueDispose(created, true)
+            throw CaptureError.queueFailed("start", status)
+        }
+        queue = created
     }
 
-    private func stopCurrentEngine() {
-        guard let engine else { return }
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        self.engine = nil
+    private func stopCurrentQueue() {
+        guard let queue else { return }
+        self.queue = nil
+        AudioQueueStop(queue, true)
+        // Let callbacks already dispatched finish re-enqueueing before the
+        // queue they reference is freed.
+        bufferQueue.sync {}
+        AudioQueueDispose(queue, true)
     }
 
-    private func handleConfigurationChange(_ notification: Notification) {
-        guard isCapturing,
-              let engine,
-              let changedEngine = notification.object as? AVAudioEngine,
-              changedEngine === engine
-        else { return }
-
-        Log.write("audio input configuration changed; rebuilding capture engine")
-        stopCurrentEngine()
+    private func handleDefaultInputChange() {
+        guard isCapturing else { return }
+        Log.write("default audio input changed; rebuilding capture queue")
+        stopCurrentQueue()
         scheduleRecovery(attempt: 1)
     }
 
@@ -112,7 +173,7 @@ final class AudioCapture {
             self?.recover(attempt: attempt)
         }
         recoveryWork = work
-        DispatchQueue.main.asyncAfter(
+        controlQueue.asyncAfter(
             deadline: .now() + Self.recoveryDelay,
             execute: work
         )
@@ -121,7 +182,7 @@ final class AudioCapture {
     private func recover(attempt: Int) {
         guard isCapturing else { return }
         do {
-            try startFreshEngine()
+            try startFreshQueue()
             recoveryWork = nil
             Log.write("audio input recovered after device change")
         } catch {
@@ -129,45 +190,21 @@ final class AudioCapture {
                 isCapturing = false
                 recoveryWork = nil
                 Log.write("audio input recovery failed: \(error.localizedDescription)")
-                onFailure?(error)
+                DispatchQueue.main.async { self.onFailure?(error) }
                 return
             }
             scheduleRecovery(attempt: attempt + 1)
         }
     }
 
-    private func handle(
-        _ buffer: AVAudioPCMBuffer,
-        inFormat: AVAudioFormat,
-        converter: AVAudioConverter
-    ) {
-
-        let ratio = targetFormat.sampleRate / inFormat.sampleRate
-        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 64
-        guard let out = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else {
-            return
+    private func handle(_ buffer: AudioQueueBuffer) {
+        let byteCount = Int(buffer.mAudioDataByteSize)
+        guard byteCount > 0 else { return }
+        let data = Data(bytes: buffer.mAudioData, count: byteCount)
+        let level = data.withUnsafeBytes { raw in
+            Self.level(of: raw.bindMemory(to: Int16.self))
         }
-
-        var consumed = false
-        var error: NSError?
-        converter.convert(to: out, error: &error) { _, status in
-            if consumed {
-                status.pointee = .noDataNow
-                return nil
-            }
-            consumed = true
-            status.pointee = .haveData
-            return buffer
-        }
-        guard error == nil, out.frameLength > 0,
-              let channel = out.int16ChannelData
-        else { return }
-
-        let count = Int(out.frameLength)
-        let samples = UnsafeBufferPointer(start: channel[0], count: count)
-
-        let data = Data(buffer: samples)
-        onBuffer?(data, Self.level(of: samples))
+        onBuffer?(data, level)
     }
 
     /// RMS on converted samples, mapped to a perceptually useful 0...1.
@@ -179,15 +216,12 @@ final class AudioCapture {
     }
 
     private enum CaptureError: LocalizedError {
-        case inputNotReady
-        case unsupportedInputFormat
+        case queueFailed(String, OSStatus)
 
         var errorDescription: String? {
             switch self {
-            case .inputNotReady:
-                return "The selected microphone is not ready"
-            case .unsupportedInputFormat:
-                return "The selected microphone format is unsupported"
+            case let .queueFailed(step, status):
+                return "The microphone could not \(step) its audio queue (status \(status))"
             }
         }
     }

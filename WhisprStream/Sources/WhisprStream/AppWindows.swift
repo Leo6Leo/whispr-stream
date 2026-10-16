@@ -10,6 +10,7 @@ import SwiftUI
 final class AppWindows {
     private var onboarding: NSWindow?
     private var settings: NSWindow?
+    private let settingsNavigation = SettingsNavigation()
     private var about: NSWindow?
     private var updatePrompt: NSWindow?
     private var firstDictationCoach: FirstDictationCoachPanel?
@@ -79,11 +80,15 @@ final class AppWindows {
 
     // MARK: - Settings
 
+    /// `section` moves an already open window too, so a blocked dictation can
+    /// land the user on the Permissions tab whatever they were looking at.
     func showSettings(
         _ appSettings: Settings,
         runtime: RuntimeManager,
-        updates: AppUpdateManager
+        updates: AppUpdateManager,
+        section: SettingsSection? = nil
     ) {
+        if let section { settingsNavigation.section = section }
         if let settings {
             present(settings)
             return
@@ -93,6 +98,7 @@ final class AppWindows {
             settings: appSettings,
             runtime: runtime,
             updates: updates,
+            navigation: settingsNavigation,
             onShowUpdate: { [weak self, weak updates] in
                 guard let updates else { return }
                 self?.showUpdatePrompt(updates: updates)

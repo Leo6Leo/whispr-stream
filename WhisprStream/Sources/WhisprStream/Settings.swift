@@ -211,6 +211,12 @@ final class Settings: ObservableObject {
         }
     }
 
+    /// Watch the destination field after inserting and keep hand edits to the
+    /// inserted text, with the utterance audio, as local training samples.
+    @Published var captureCorrections: Bool {
+        didSet { defaults.set(captureCorrections, forKey: Keys.captureCorrections) }
+    }
+
     var onLearningChange: (() -> Void)?
 
     /// Keep sentence-ending punctuation from the speech model. When disabled,
@@ -491,6 +497,7 @@ final class Settings: ObservableObject {
         static let copyToClipboard = "copyToClipboard"
         static let reviewUncertainWords = "reviewUncertainWords.v1"
         static let learnFromCorrections = "learnFromCorrections.v1"
+        static let captureCorrections = "captureCorrections.v1"
         static let usePunctuation = "usePunctuation"
         static let removeFillerWords = "removeFillerWords"
         static let contextAwareCapitalization = "contextAwareCapitalization"
@@ -536,6 +543,7 @@ final class Settings: ObservableObject {
         copyToClipboard = defaults.object(forKey: Keys.copyToClipboard) as? Bool ?? true
         reviewUncertainWords = defaults.bool(forKey: Keys.reviewUncertainWords)
         learnFromCorrections = defaults.bool(forKey: Keys.learnFromCorrections)
+        captureCorrections = defaults.bool(forKey: Keys.captureCorrections)
         usePunctuation = defaults.object(forKey: Keys.usePunctuation) as? Bool ?? true
         removeFillerWords = defaults.object(forKey: Keys.removeFillerWords) as? Bool ?? true
         contextAwareCapitalization = defaults.object(

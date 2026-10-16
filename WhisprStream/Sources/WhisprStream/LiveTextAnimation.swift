@@ -1,0 +1,186 @@
+import Foundation
+
+/// Arrival times belong to glyphs, not hypotheses. A new hypothesis can arrive
+/// before the preceding animation finishes; matching glyphs must never replay.
+///
+/// Ported from the Meeting Notes live transcript
+/// (codex/local-meeting-transcription), which grouped arrivals into word
+/// springs the same way.
+struct LiveTextAnimation {
+    struct Run: Equatable {
+        var text: String
+        let startedAt: Date?
+    }
+
+    /// One animated unit: an English word with its trailing punctuation and
+    /// space, or a single CJK character with any punctuation that follows it.
+    struct Word: Equatable {
+        var text: String
+        /// When this word's spring starts, already staggered after the other
+        /// words from the same preview. Nil once settled.
+        let startsAt: Date?
+        let isCommitted: Bool
+    }
+
+    /// Words from one preview start 25 ms apart, bounded so a large result
+    /// is never held back for long.
+    static let stagger: TimeInterval = 0.025
+    static let maximumStagger: TimeInterval = 0.18
+
+    private(set) var text: String
+    private var characters: [Character]
+    private var arrivals: [Date?]
+    /// How long an arrival stays live: the longest stagger plus the spring.
+    private let retireAfter: TimeInterval
+
+    init(stableText: String = "", retireAfter: TimeInterval = LiveTranscriptMotion.duration) {
+        text = stableText
+        characters = Array(stableText)
+        arrivals = Array(repeating: nil, count: characters.count)
+        self.retireAfter = retireAfter
+    }
+
+    var runs: [Run] {
+        var result: [Run] = []
+        for (character, arrival) in zip(characters, arrivals) {
+            if !result.isEmpty && result[result.count - 1].startedAt == arrival {
+                result[result.count - 1].text.append(character)
+            } else {
+                result.append(Run(text: String(character), startedAt: arrival))
+            }
+        }
+        return result
+    }
+
+    /// Words with their staggered start times. A word animates whole if any
+    /// of its characters is new, so a revised word springs in again while
+    /// untouched neighbours stay put. Words never straddle `committedCount`,
+    /// so each keeps a single style.
+    func words(committedCount: Int) -> [Word] {
+        var result: [Word] = []
+        var staggerIndex: [Date: Int] = [:]
+        for range in Self.wordRanges(in: characters, splittingAt: committedCount) {
+            let arrival = arrivals[range].compactMap { $0 }.max()
+            var startsAt: Date?
+            if let arrival {
+                let index = staggerIndex[arrival, default: 0]
+                staggerIndex[arrival] = index + 1
+                startsAt = arrival.addingTimeInterval(
+                    min(Double(index) * Self.stagger, Self.maximumStagger)
+                )
+            }
+            result.append(Word(
+                text: String(characters[range]),
+                startsAt: startsAt,
+                isCommitted: range.lowerBound < committedCount
+            ))
+        }
+        return result
+    }
+
+    var animationEnd: Date? {
+        arrivals.compactMap { $0 }.max()?.addingTimeInterval(retireAfter)
+    }
+
+    mutating func update(to newText: String, at now: Date) {
+        // Continuous 200 ms previews can outpace the animation indefinitely.
+        // Retire finished glyphs here as well as on idle, keeping frame work
+        // bounded to the recent tail even throughout uninterrupted speech.
+        settle(at: now)
+        guard text != newText else { return }
+        let next = Array(newText)
+        let prefix = zip(characters, next).prefix { $0 == $1 }.count
+        var suffix = 0
+        while suffix < min(characters.count, next.count) - prefix,
+              characters[characters.count - suffix - 1] == next[next.count - suffix - 1] {
+            suffix += 1
+        }
+        // Trim the stable paragraph first. Align only the edited middle so a
+        // correction plus an append doesn't reanimate the words between them.
+        let oldMiddle = Array(characters[prefix..<(characters.count - suffix)])
+        let newMiddle = Array(next[prefix..<(next.count - suffix)])
+        // Prefer earlier occurrences when an appended word repeats a letter
+        // from the existing tail (e.g. "plan" → "plan. Bring notes"). The
+        // standard forward diff otherwise pairs that letter with the append.
+        let difference = Array(newMiddle.reversed()).difference(from: Array(oldMiddle.reversed()))
+        var removed = Set<Int>()
+        var inserted = Set<Int>()
+        for change in difference {
+            switch change {
+            case let .remove(offset, _, _): removed.insert(oldMiddle.count - 1 - offset)
+            case let .insert(offset, _, _): inserted.insert(newMiddle.count - 1 - offset)
+            }
+        }
+        var survivors = oldMiddle.indices.filter { !removed.contains($0) }
+            .map { arrivals[prefix + $0] }.makeIterator()
+        let middleArrivals: [Date?] = newMiddle.indices.map { index in
+            if inserted.contains(index) { return now }
+            return survivors.next() ?? nil
+        }
+        arrivals = Array(arrivals.prefix(prefix)) + middleArrivals + Array(arrivals.suffix(suffix))
+        characters = next
+        text = newText
+    }
+
+    mutating func settle(at now: Date) {
+        for index in arrivals.indices {
+            if let arrival = arrivals[index], now.timeIntervalSince(arrival) >= retireAfter {
+                arrivals[index] = nil
+            }
+        }
+    }
+
+    /// Splits text into animation units. Latin words stay whole (apostrophes
+    /// included), unspaced CJK animates per character, and punctuation and
+    /// spaces ride with the unit before them.
+    static func wordRanges(in characters: [Character], splittingAt boundary: Int) -> [Range<Int>] {
+        var ranges: [Range<Int>] = []
+        var index = 0
+        while index < characters.count {
+            let start = index
+            let limit = start < boundary ? min(boundary, characters.count) : characters.count
+            if isCJK(characters[index]) {
+                index += 1
+            } else if isWordCharacter(characters[index]) {
+                while index < limit,
+                      isWordCharacter(characters[index])
+                        || (isApostrophe(characters[index])
+                            && index + 1 < limit
+                            && isWordCharacter(characters[index + 1])) {
+                    index += 1
+                }
+            }
+            while index < limit,
+                  !isCJK(characters[index]),
+                  !isWordCharacter(characters[index]) {
+                index += 1
+            }
+            if index == start { index += 1 }
+            ranges.append(start..<index)
+        }
+        return ranges
+    }
+
+    private static func isWordCharacter(_ character: Character) -> Bool {
+        !isCJK(character) && (character.isLetter || character.isNumber || character == "_")
+    }
+
+    private static func isApostrophe(_ character: Character) -> Bool {
+        character == "'" || character == "’"
+    }
+
+    private static func isCJK(_ character: Character) -> Bool {
+        guard let scalar = character.unicodeScalars.first else { return false }
+        switch scalar.value {
+        case 0x3040...0x30FF,   // Hiragana, Katakana
+             0x3400...0x4DBF,   // CJK Extension A
+             0x4E00...0x9FFF,   // CJK Unified Ideographs
+             0xAC00...0xD7AF,   // Hangul syllables
+             0xF900...0xFAFF,   // CJK Compatibility Ideographs
+             0x20000...0x2FFFF: // CJK Extensions B+
+            return true
+        default:
+            return false
+        }
+    }
+}

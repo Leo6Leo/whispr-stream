@@ -110,6 +110,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var reviewTarget: TextInserter.ReviewTarget?
     private var pendingTranscriptDeliveries = 0
     private var needsCursorSnapshotAfterDelivery = false
+    /// Passive correction capture: the utterance audio is kept only until the
+    /// destination field settles, and is written to disk only with a correction.
+    private let utteranceAudio = ReviewAudioBuffer()
+    /// The raw transcript and audio of the utterance whose transcript is being
+    /// delivered. Snapshotted when the final result arrives, because the next
+    /// dictation may begin (and restart `utteranceAudio`) before the paste
+    /// completion that starts the correction watch has run.
+    private struct CapturedUtterance {
+        let rawTranscript: String
+        let audio: Data
+    }
+    private var capturedUtterance: CapturedUtterance?
+    private var correctionCapture: CorrectionCaptureSession?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // The updater retains its rollback copy until this process proves that
@@ -351,6 +364,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settings.onShortUtteranceLanguageChange = { [weak self] _ in self?.reloadASR() }
         let onBuffer: (Data, Float) -> Void = { [weak self] pcm, level in
             self?.asr?.sendAudio(pcm)
+            self?.utteranceAudio.append(pcm)
             DispatchQueue.main.async {
                 guard let self, self.state.phase == .listening else { return }
                 self.state.level = self.state.level * 0.55 + CGFloat(level) * 0.45
@@ -468,6 +482,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             stopCapture()
             state.stopDictationTimer()
             state.level = 0
+            utteranceAudio.discard()
             cancelCursorContextResolution()
             dismissNow()
         }
@@ -630,7 +645,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Log.write("dictation start ignored while cursor context probe settles")
             return false
         }
+        if settings.audioSource == .systemAudio, !Permissions.isScreenCaptureGranted {
+            presentSystemAudioPermissionNeeded()
+            return false
+        }
         dismissWork?.cancel()
+        // A new dictation settles whatever the previous insertion became.
+        correctionCapture?.finish()
+        correctionCapture = nil
+        capturedUtterance = nil
+        utteranceAudio.begin(retaining: settings.captureCorrections)
         cursorContextGeneration &+= 1
         resolvedPrecedingText = nil
         isResolvingPrecedingText = false
@@ -652,28 +676,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for: settings.shortUtteranceLanguage
         )
         asr.beginUtterance(shortUtteranceLanguage: shortLanguage)
-        do {
-            try startCapture()
-            // Accessibility is instantaneous when an editor exposes its text.
-            // For other apps, run the guarded keyboard fallback while the user
-            // is speaking so its clipboard waits are off the critical path.
-            if settings.autoInsert,
-               settings.contextAwareCapitalization,
-               !hasResolvedPrecedingText {
-                startCursorContextResolution(allowWhilePhysicalModifiersPressed: true)
-            }
-            return true
-        } catch {
-            failSpeechEngine("Microphone unavailable")
-            return false
+        startCapture()
+        // Accessibility is instantaneous when an editor exposes its text.
+        // For other apps, run the guarded keyboard fallback while the user
+        // is speaking so its clipboard waits are off the critical path.
+        if settings.autoInsert,
+           settings.contextAwareCapitalization,
+           !hasResolvedPrecedingText {
+            startCursorContextResolution(allowWhilePhysicalModifiersPressed: true)
         }
+        return true
     }
 
-    /// System audio starts asynchronously and reports problems through
-    /// `onFailure`; only the microphone can fail synchronously here.
-    private func startCapture() throws {
+    /// Both sources start asynchronously and report problems through
+    /// `onFailure`, so the HUD is never blocked behind device setup.
+    private func startCapture() {
         switch settings.audioSource {
-        case .microphone: try capture.start()
+        case .microphone: capture.start()
         case .systemAudio: systemCapture.start()
         }
         sourceToggleTap.setEnabled(true)
@@ -685,12 +704,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         systemCapture.stop()
     }
 
+    /// System audio cannot start without Screen & System Audio Recording.
+    /// Left alone, ScreenCaptureKit shows the system prompt and then fails
+    /// with a bare "unavailable", so say what is missing and open the
+    /// Permissions tab, where one click grants it. Onboarding never asks for
+    /// this permission: it is optional and only matters once this source is
+    /// chosen.
+    private func presentSystemAudioPermissionNeeded() {
+        Log.write("dictation start blocked: system audio selected without Screen & System Audio Recording")
+        dismissWork?.cancel()
+        state.reset()
+        state.phase = .failed("System audio needs Screen & System Audio Recording")
+        panel.present()
+        scheduleDismiss(after: 3)
+        windows.showSettings(settings, runtime: runtime, updates: updates, section: .permissions)
+    }
+
     /// ⌥S while listening. Both sources feed the same utterance, so the
     /// transcript continues across the switch; the HUD's rainbow tint follows
     /// `settings.audioSource`. The choice persists for the next dictation.
     private func toggleAudioSource() {
         guard state.phase == .listening else { return }
         let next: AudioSource = settings.audioSource == .microphone ? .systemAudio : .microphone
+        if next == .systemAudio, !Permissions.isScreenCaptureGranted {
+            // Stay on the microphone. A system prompt or a window mid-sentence
+            // would take focus from the field being dictated into, so the HUD
+            // only says where the grant lives.
+            Log.write("audio source switch refused: Screen & System Audio Recording not granted")
+            state.showNotice("Grant Screen & System Audio Recording in Settings → Permissions")
+            return
+        }
         settings.audioSource = next
         Log.write("audio source switched mid-dictation to \(next.rawValue)")
         switch next {
@@ -699,11 +742,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             systemCapture.start()
         case .microphone:
             systemCapture.stop()
-            do {
-                try capture.start()
-            } catch {
-                failSpeechEngine("Microphone unavailable")
-            }
+            capture.start()
         }
     }
 
@@ -735,6 +774,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case let .final(text, secs, ms, review):
             guard state.phase == .thinking, reviewPanel == nil else { return }
             precedingTextAtDictationStart = nil
+            captureUtterance(rawTranscript: text)
             state.lastAudioSecs = secs
             state.lastDurationMS = ms
             guard !text.isEmpty else {
@@ -765,6 +805,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkey?.cancelActiveDictation()
         state.stopDictationTimer()
         state.level = 0
+        // No final result will follow, so nothing can consume the held audio.
+        utteranceAudio.discard()
 
         speechEngineStartupWork?.cancel()
         speechEngineStartupWork = nil
@@ -975,21 +1017,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.phase = forceClipboard ? .failed("Copied — return to your original field to paste") : .inserted
 
         pendingTranscriptDeliveries += 1
+        let insertAtCursor = settings.autoInsert && !forceClipboard
+        // Take the utterance now: by the time the paste completes, a new
+        // dictation may already own `utteranceAudio` and `capturedUtterance`.
+        let utterance = insertAtCursor ? capturedUtterance : nil
+        capturedUtterance = nil
         TextInserter.deliver(
             deliveredText,
             insertionText: insertionText,
-            insertAtCursor: settings.autoInsert && !forceClipboard,
+            insertAtCursor: insertAtCursor,
             copyToClipboard: settings.copyToClipboard || forceClipboard,
             targetProcessID: targetProcessID,
             completion: { [weak self] in
                 guard let self else { return }
                 self.pendingTranscriptDeliveries -= 1
+                if let utterance {
+                    self.beginCorrectionCapture(insertedText: deliveredText, utterance: utterance)
+                }
                 self.resumeDictationAfterDelivery()
                 self.scheduleAutomaticUpdatePrompt()
             }
         )
         settings.playFeedback()
         scheduleDismiss(after: forceClipboard ? 3 : 0.42)
+    }
+
+    /// Keeps the utterance's raw transcript and audio for the correction watch.
+    /// Audio is held only while the feature is on and only until the paste
+    /// that it describes has landed.
+    private func captureUtterance(rawTranscript: String) {
+        let audio = utteranceAudio.snapshot()
+        utteranceAudio.discard()
+        guard settings.captureCorrections, !rawTranscript.isEmpty, !audio.isEmpty else {
+            capturedUtterance = nil
+            return
+        }
+        capturedUtterance = CapturedUtterance(rawTranscript: rawTranscript, audio: audio)
+    }
+
+    /// Watches the field the transcript was pasted into. A hand edit confined
+    /// to the inserted text becomes a local training sample with the audio.
+    private func beginCorrectionCapture(insertedText: String, utterance: CapturedUtterance) {
+        guard settings.captureCorrections else { return }
+        correctionCapture?.finish()
+        let model = settings.model
+        let session = CorrectionCaptureSession(insertedText: insertedText) { [weak self] correction in
+            guard let self else { return }
+            self.correctionCapture = nil
+            guard let correction, self.settings.captureCorrections else { return }
+            let corrected = insertedText.replacingOccurrences(of: correction.inserted, with: correction.corrected)
+            do {
+                try TrainingDataStore.shared.addSample(
+                    rawTranscript: utterance.rawTranscript,
+                    suggestedTranscript: insertedText,
+                    correctedTranscript: corrected,
+                    pcm16Mono16k: utterance.audio,
+                    model: model,
+                    origin: "passive-edit"
+                )
+                // Counts only: dictated text never goes to the log.
+                Log.write("correction capture: saved sample replaced=\(correction.inserted.count) chars corrected=\(correction.corrected.count) chars")
+            } catch {
+                Log.write("correction capture: save failed \(error.localizedDescription)")
+            }
+        }
+        if session.start() { correctionCapture = session }
     }
 
     private func scheduleDismiss(after delay: TimeInterval) {

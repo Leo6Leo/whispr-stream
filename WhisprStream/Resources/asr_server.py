@@ -86,6 +86,13 @@ PREVIEW_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+(?:['’][A-Za-z0-9_]+)*|\s+|.", re
 # verbatim (often the first one) even when the speaker said something unrelated.
 # Only that narrow result shape receives an unprompted verification pass.
 CONTEXT_SUPPORT_MIN_SIMILARITY = 2 / 3
+# A matching consonant skeleton (``Laura``/``LoRA``) only counts as spelling
+# evidence when the words are already close. Without these floors a skeleton
+# match treated ``have`` as ``Hevy`` and ``the`` as ``OAuth`` on every
+# dictation, rewriting ordinary words with no acoustic evidence at all.
+CONTEXT_SKELETON_MIN_SIMILARITY = 0.6
+CONTEXT_SKELETON_MIN_TERM_LENGTH = 3
+CONTEXT_SKELETON_MAX_LENGTH_DELTA = 1
 CONTEXT_PREVIEW_MAX_UNSEEN_SEC = 1.0
 CONTEXT_SPLIT_MIN_SIMILARITY = 0.75
 CONTEXT_SPLIT_MAX_WORDS = 3
@@ -442,12 +449,22 @@ def latin_consonant_skeleton(text: str) -> str:
 
 
 def context_support_score(term: str, transcript: str) -> float:
-    """Score spelling evidence, including variants such as LoRA/Laura."""
+    """Score spelling evidence, including variants such as LoRA/Laura.
+
+    A shared consonant skeleton upgrades an already-similar spelling to full
+    support. It never rescues a distant one: ``have`` and ``Hevy`` share the
+    skeleton ``hv`` but are different words, as are ``the`` and ``OAuth``.
+    """
     score = context_text_similarity(term, transcript)
+    expected = normalized_context_text(term)
+    observed = normalized_context_text(transcript)
     expected_skeleton = latin_consonant_skeleton(term)
     observed_skeleton = latin_consonant_skeleton(transcript)
     if (
-        len(expected_skeleton) >= 2
+        score >= CONTEXT_SKELETON_MIN_SIMILARITY
+        and len(expected) >= CONTEXT_SKELETON_MIN_TERM_LENGTH
+        and abs(len(expected) - len(observed)) <= CONTEXT_SKELETON_MAX_LENGTH_DELTA
+        and len(expected_skeleton) >= 2
         and expected_skeleton == observed_skeleton
     ):
         return 1.0
@@ -488,6 +505,31 @@ def context_term_has_unprompted_support(term: str, transcript: str) -> bool:
     )
 
 
+# Everyday English words are never rewritten into a vocabulary term by the
+# unverified spelling pass. A vocabulary entry that *is* such a word still
+# matches exactly; only fuzzy (skeleton/edit-distance) rewrites are blocked.
+COMMON_ENGLISH_WORDS = frozenset("""
+a about above after again against all also am an and any are as at
+be because been before being below between both but by
+can could did do does doing done down during
+each even ever every few for from further
+get give go going got had has have having he her here hers him his how
+i if in into is it its just
+let like look made make many may me might more most much must my
+need never new no nor not now of off on once one only or other our out over own
+per pro put really right said same say see she should since so some still such
+take than that the their them then there these they this those through to too two
+under until up upon us use used very
+want was way we well were what when where which while who whom why will with
+would yes yet you your
+""".split())
+
+
+def is_common_english_word(text: str) -> bool:
+    """Return True for everyday words that fuzzy canonicalization must skip."""
+    return normalized_context_text(text) in COMMON_ENGLISH_WORDS
+
+
 def canonicalize_context_variants(transcript: str, context: str) -> str:
     """Restore vocabulary spelling for strong one- or multi-token variants.
 
@@ -512,6 +554,12 @@ def canonicalize_context_variants(transcript: str, context: str) -> str:
             observed = transcript[start:end]
             for term in terms:
                 if width == 1:
+                    if (
+                        is_common_english_word(observed)
+                        and normalized_context_text(observed)
+                        != normalized_context_text(term)
+                    ):
+                        continue
                     score = context_support_score(term, observed)
                     supported = score == 1.0
                 else:
@@ -681,8 +729,17 @@ def canonicalize_from_preview_context(
     for index, token in enumerate(transcript_tokens):
         term, score = best_supported_term(terms, token.text)
         # Preview evidence is weaker than an unprompted verification pass, so
-        # require exact normalized spelling or an identical consonant skeleton.
-        if term is not None and score == 1.0:
+        # require exact normalized spelling or an identical consonant skeleton,
+        # and never fuzzily rewrite an everyday word.
+        if (
+            term is not None
+            and score == 1.0
+            and (
+                not is_common_english_word(token.text)
+                or normalized_context_text(token.text)
+                == normalized_context_text(term)
+            )
+        ):
             candidates.append((index, index / transcript_denominator, term))
 
     replacements: list[tuple[int, int, str]] = []

@@ -20,15 +20,34 @@ final class ASRService {
     func setContext(_ terms: String) {}
     func sendAudio(_ pcm: Data) {}
 }
+enum AudioSource: String { case microphone, systemAudio }
+enum Permissions { static var isScreenCaptureGranted = true }
+/// The microphone opens its AudioQueue off the main thread, so a rejected
+/// start is reported later through `onFailure`. Scenarios count the rejected
+/// start here and deliver that callback themselves.
 final class Capture {
     var capturing = false, shouldFailStart = false
+    var starts = 0, failedStarts = 0
     var onBuffer: ((Data, Float) -> Void)?
     var onFailure: ((Error) -> Void)?
-    func start() throws {
+    func start() {
+        starts += 1
+        guard !shouldFailStart else { failedStarts += 1; capturing = false; return }
         capturing = true
-        if shouldFailStart { throw InjectedFailure.failed }
     }
     func stop() { capturing = false }
+}
+final class SystemAudioCapture {
+    var capturing = false, starts = 0
+    var onBuffer: ((Data, Float) -> Void)?
+    var onFailure: ((Error) -> Void)?
+    func start() { starts += 1; capturing = true }
+    func stop() { capturing = false }
+}
+final class SourceToggleKeyTap {
+    var onToggle: (() -> Void)?
+    var isEnabled = false
+    func setEnabled(_ enabled: Bool) { isEnabled = enabled }
 }
 final class HotKeyMonitor {
     var active = false
@@ -44,6 +63,8 @@ final class State {
     var level: CGFloat = 0
     var lastAudioSecs = 0.0, lastDurationMS = 0
     var committed = "", tail = "", timerRunning = false
+    var notice: String?
+    func showNotice(_ text: String, for duration: TimeInterval = 2.6) { notice = text }
     func startDictationTimer() { timerRunning = true }
     func stopDictationTimer() { timerRunning = false }
     func reset() { committed = ""; tail = ""; level = 0; stopDictationTimer() }
@@ -53,6 +74,7 @@ final class Settings {
     let model = Model()
     var autoInsert = false, contextAwareCapitalization = false, isReloadingModel = false
     var copyToClipboard = true
+    var audioSource: AudioSource = .microphone, captureCorrections = false
     var reviewUncertainWords = false, learnFromCorrections = true, isCapturingTriggerShortcut = false
     var triggerShortcut = 0, activationMode = 0, shortUtteranceLanguage = "auto"
     var onHotKeyConfigurationChange: (() -> Void)?
@@ -77,7 +99,17 @@ final class Panel {
     func present() { onPresent?(); presentationGeneration += 1; isVisible = true }
     func dismiss(completion: (() -> Void)? = nil) { isVisible = false; completion?() }
 }
-final class Windows { func dismissFirstDictationCoach() {} }
+final class RuntimeManager { static let shared = RuntimeManager() }
+final class AppUpdateManager {}
+enum SettingsSection { case permissions }
+final class Windows {
+    var settingsSections: [SettingsSection?] = []
+    func dismissFirstDictationCoach() {}
+    func showSettings(_ settings: Settings, runtime: RuntimeManager, updates: AppUpdateManager,
+                      section: SettingsSection? = nil) {
+        settingsSections.append(section)
+    }
+}
 final class TargetApplication {
     var activations = 0
     func activate(options: [Int]) { activations += 1 }
@@ -143,10 +175,55 @@ final class CorrectionStore {
     var records = 0
     func record(_ review: DictationReview, chosenText: String, model: String, manual: Bool) { records += 1 }
 }
+struct CapturedUtterance { let rawTranscript: String; let audio: Data }
+struct CapturedCorrection: Equatable { let inserted: String; let corrected: String }
+final class ReviewAudioBuffer {
+    private var pcm = Data()
+    var begins = 0, retaining = false
+    func begin(retaining: Bool) { begins += 1; self.retaining = retaining; pcm = Data() }
+    func append(_ data: Data) { if retaining { pcm.append(data) } }
+    func snapshot() -> Data { pcm }
+    func discard() { retaining = false; pcm = Data() }
+}
+/// Watches the pasted-into field. `finishResult` is what the user is deemed
+/// to have typed by the time the watch ends.
+final class CorrectionCaptureSession {
+    static var canObserve = true
+    let insertedText: String
+    private let onFinish: (CapturedCorrection?) -> Void
+    var finishResult: CapturedCorrection?
+    var finished = false
+    init(insertedText: String, onFinish: @escaping (CapturedCorrection?) -> Void) {
+        self.insertedText = insertedText
+        self.onFinish = onFinish
+    }
+    func start() -> Bool { Self.canObserve }
+    func finish() {
+        guard !finished else { return }
+        finished = true
+        onFinish(finishResult)
+    }
+}
+final class TrainingDataStore {
+    struct Sample: Equatable { let raw: String, suggested: String, corrected: String, origin: String? }
+    static let shared = TrainingDataStore()
+    var samples: [Sample] = []
+    var audioBytes = 0
+    func addSample(rawTranscript: String, suggestedTranscript: String, correctedTranscript: String,
+                   pcm16Mono16k: Data, model: Settings.Model, origin: String? = nil) throws {
+        samples.append(Sample(raw: rawTranscript, suggested: suggestedTranscript,
+                              corrected: correctedTranscript, origin: origin))
+        audioBytes += pcm16Mono16k.count
+    }
+}
 
 final class Harness {
     static let speechEngineStartupTimeout: TimeInterval = 20
-    let capture = Capture(), state = State(), settings = Settings(), panel = Panel(), windows = Windows()
+    let capture = Capture(), systemCapture = SystemAudioCapture(), sourceToggleTap = SourceToggleKeyTap()
+    let state = State(), settings = Settings(), panel = Panel(), windows = Windows()
+    let runtime = RuntimeManager.shared, updates = AppUpdateManager()
+    let utteranceAudio = ReviewAudioBuffer()
+    var capturedUtterance: CapturedUtterance?, correctionCapture: CorrectionCaptureSession?
     var asr: ASRService!, hotkey: HotKeyMonitor!
     var isASRReady = false, shouldShowFirstDictationCoach = false
     var hasResolvedPrecedingText = false, isResolvingPrecedingText = false
@@ -327,8 +404,32 @@ case "microphone-failure":
     let app = readyApp()
     app.capture.shouldFailStart = true
     let service = app.asr!
-    check(!app.beginDictation(), "microphone launch failure rejects recording")
-    check(!app.capture.capturing && app.asr == nil && service.shutdowns == 1, "microphone launch failure retires utterance")
+    check(app.beginDictation() && app.state.phase == .listening, "microphone setup never blocks the shortcut")
+    app.hotkey.active = true
+    check(app.capture.failedStarts == 1 && !app.capture.capturing, "rejected microphone start leaves no capture running")
+    app.panel.onPresent = {
+        check(!app.sourceToggleTap.isEnabled && !app.state.timerRunning && !app.hotkey.active,
+              "failure HUD must follow source toggle, timer and key cleanup")
+    }
+    app.capture.onFailure?(InjectedFailure.failed)
+    app.panel.onPresent = nil
+    check(app.state.phase == .failed("Microphone unavailable"), "asynchronous microphone failure names the microphone")
+    check(app.asr == nil && service.shutdowns == 1 && service.stops == 0, "microphone failure retires the utterance without finalizing it")
+    app.endDictation() // Physical release arrives after the failure.
+    check(service.stops == 0, "release after microphone failure cannot finalize")
+    app.dismissWork?.perform()
+    check(app.state.phase == .idle, "microphone failure dismisses back to idle")
+    app.capture.shouldFailStart = false
+    check(app.beginDictation() && app.capture.capturing && app.asr != nil, "next shortcut restarts the engine and records")
+    // A failure that arrives once the key is released must not abort the
+    // transcript the engine is still finalizing.
+    let released = listeningApp()
+    let pending = released.asr!
+    released.endDictation()
+    released.capture.onFailure?(InjectedFailure.failed)
+    check(released.asr === pending && released.state.phase == .thinking, "late microphone failure cannot abort a finalizing utterance")
+    pending.onEvent?(.final(text: "kept", secs: 1, ms: 1, review: nil))
+    check(released.delivered == ["kept"], "transcript survives a late microphone failure")
     let route = listeningApp()
     route.capture.onFailure?(InjectedFailure.failed)
     check(!route.capture.capturing && route.asr == nil && !route.hotkey.active, "route failure cancels active capture and key state")
@@ -483,6 +584,100 @@ case "deferred-probe-cancelled":
             check(app.delivered.count == deliveredCount, "cancelled queued final is never inserted")
         }
     }
+case "system-audio":
+    let app = readyApp()
+    let service = app.asr!
+    app.settings.audioSource = .systemAudio
+    Permissions.isScreenCaptureGranted = false
+    check(!app.beginDictation(), "system audio without its permission refuses to record")
+    check(app.state.phase == .failed("System audio needs Screen & System Audio Recording") && app.panel.isVisible,
+          "refusal names the missing permission")
+    check(app.windows.settingsSections == [.permissions], "refusal opens the Permissions tab")
+    check(!app.capture.capturing && !app.systemCapture.capturing && service.begins == 0, "refusal opens no capture and no utterance")
+    check(app.asr === service && app.isASRReady, "refusal keeps the engine ready")
+    app.dismissWork?.perform()
+    check(app.state.phase == .idle, "refusal dismisses back to idle")
+    Permissions.isScreenCaptureGranted = true
+    check(app.beginDictation(), "granted permission records system audio")
+    app.hotkey.active = true
+    check(app.systemCapture.capturing && !app.capture.capturing && app.sourceToggleTap.isEnabled,
+          "system audio source captures output only and arms the source toggle")
+    app.sourceToggleTap.onToggle?()
+    check(app.settings.audioSource == .microphone && app.capture.capturing && !app.systemCapture.capturing,
+          "toggle switches to the microphone mid-dictation")
+    check(app.state.phase == .listening && service.begins == 1, "switching sources keeps the utterance")
+    app.sourceToggleTap.onToggle?()
+    check(app.settings.audioSource == .systemAudio && app.systemCapture.capturing && !app.capture.capturing,
+          "toggle switches back to system audio")
+    app.systemCapture.onFailure?(InjectedFailure.failed)
+    check(app.state.phase == .failed("System audio unavailable"), "system audio failure names its source")
+    check(!app.systemCapture.capturing && !app.sourceToggleTap.isEnabled && !app.hotkey.active,
+          "system audio failure stops capture, disarms the toggle and releases the key")
+    check(app.asr == nil && service.shutdowns == 1 && service.stops == 0, "system audio failure retires the utterance")
+    // Without the permission, the toggle stays on the microphone and only says
+    // where the grant lives: a prompt mid-sentence would steal focus.
+    let mic = listeningApp()
+    Permissions.isScreenCaptureGranted = false
+    mic.sourceToggleTap.onToggle?()
+    check(mic.settings.audioSource == .microphone && mic.capture.capturing && mic.systemCapture.starts == 0,
+          "toggle without permission stays on the microphone")
+    check(mic.state.phase == .listening && mic.state.notice != nil, "refused toggle keeps recording and explains")
+    Permissions.isScreenCaptureGranted = true
+    mic.endDictation()
+    check(!mic.sourceToggleTap.isEnabled && !mic.capture.capturing && !mic.systemCapture.capturing,
+          "release disarms the toggle and stops every source")
+case "correction-capture":
+    let app = readyApp()
+    app.settings.autoInsert = true
+    app.settings.captureCorrections = true
+    check(app.beginDictation() && app.utteranceAudio.begins == 1, "dictation start resets the held audio")
+    app.capture.onBuffer?(Data([1, 2, 3, 4]), 0.5)
+    app.endDictation()
+    app.asr.onEvent?(.final(text: "raw words", secs: 1, ms: 1, review: nil))
+    check(app.utteranceAudio.snapshot().isEmpty && app.capturedUtterance == nil, "final result hands the audio to the delivery and releases it")
+    check(app.delivered == ["raw words"] && app.correctionCapture == nil, "the watch waits for the paste to land")
+    check(app.beginDictation() && app.capturedUtterance == nil, "next dictation starts during the paste without inheriting the utterance")
+    TextInserter.finishDelivery()
+    let session = app.correctionCapture
+    check(session?.insertedText == "raw words", "completed paste watches the inserted text")
+    app.endDictation()
+    app.asr.onEvent?(.final(text: "", secs: 1, ms: 1, review: nil))
+    session?.finishResult = CapturedCorrection(inserted: "raw words", corrected: "row words")
+    check(app.beginDictation(), "a new dictation settles the watched field")
+    check(app.correctionCapture == nil && session?.finished == true, "new dictation ends the previous watch exactly once")
+    check(TrainingDataStore.shared.samples == [
+        TrainingDataStore.Sample(raw: "raw words", suggested: "raw words", corrected: "row words", origin: "passive-edit"),
+    ], "a confined edit becomes one training sample with the raw transcript")
+    check(TrainingDataStore.shared.audioBytes == 4, "the sample carries the utterance audio")
+    app.endDictation()
+    app.asr.onEvent?(.final(text: "", secs: 1, ms: 1, review: nil))
+    check(app.beginDictation() && TrainingDataStore.shared.samples.count == 1, "a settled watch cannot save twice")
+    let off = readyApp()
+    off.settings.autoInsert = true
+    check(off.beginDictation(), "dictation with capture off starts")
+    off.capture.onBuffer?(Data([9, 9]), 0.5)
+    check(off.utteranceAudio.snapshot().isEmpty, "capture off never holds audio in memory")
+    off.endDictation()
+    off.asr.onEvent?(.final(text: "plain", secs: 1, ms: 1, review: nil))
+    check(off.capturedUtterance == nil, "capture off records no utterance")
+    TextInserter.finishDelivery()
+    check(off.correctionCapture == nil && TrainingDataStore.shared.samples.count == 1, "capture off never watches the field")
+    // Held audio has no consumer once the utterance is aborted.
+    let lost = readyApp()
+    lost.settings.captureCorrections = true
+    check(lost.beginDictation(), "dictation with capture on starts")
+    lost.capture.onBuffer?(Data([5, 5, 5, 5]), 0.5)
+    check(lost.utteranceAudio.snapshot().count == 4, "capture on holds the utterance audio")
+    lost.asr.onEvent?(.error("injected"))
+    check(lost.utteranceAudio.snapshot().isEmpty, "engine failure releases held audio")
+    lost.utteranceAudio.append(Data([7]))
+    check(lost.utteranceAudio.snapshot().isEmpty, "a straggling buffer after failure is not kept")
+    let reloaded = readyApp()
+    reloaded.settings.captureCorrections = true
+    check(reloaded.beginDictation(), "dictation before a model reload starts")
+    reloaded.capture.onBuffer?(Data([6, 6]), 0.5)
+    reloaded.reloadASR()
+    check(reloaded.utteranceAudio.snapshot().isEmpty, "model reload releases held audio")
 default: fatalError("Unknown scenario: \(scenario)")
 }
 print("PASS \(scenario): \(checks) checks")

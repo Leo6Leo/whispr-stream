@@ -21,10 +21,14 @@ final class AppState: ObservableObject {
     @Published var lastDurationMS: Int = 0
     @Published var lastAudioSecs: Double = 0
     @Published var dictationElapsedSeconds: TimeInterval = 0
+    /// A passing message shown in place of the transcript while listening,
+    /// for example when ⌥S cannot switch to system audio. Clears itself.
+    @Published var notice: String?
 
     var onDictationLimitReached: (() -> Void)?
 
     private var dictationTimer: Timer?
+    private var noticeWork: DispatchWorkItem?
     private var dictationStartedAtUptime: TimeInterval?
     private var didReachDictationLimit = false
 
@@ -58,6 +62,21 @@ final class AppState: ObservableObject {
         tail = ""
         level = 0
         dictationElapsedSeconds = 0
+        clearNotice()
+    }
+
+    func showNotice(_ text: String, for duration: TimeInterval = 2.6) {
+        noticeWork?.cancel()
+        notice = text
+        let work = DispatchWorkItem { [weak self] in self?.clearNotice() }
+        noticeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: work)
+    }
+
+    func clearNotice() {
+        noticeWork?.cancel()
+        noticeWork = nil
+        notice = nil
     }
 
     func startDictationTimer() {
