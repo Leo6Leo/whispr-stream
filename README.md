@@ -46,7 +46,7 @@ self-signed and not notarized by Apple.
 2. Open the app. Public builds are self-signed but not notarized, so the first launch may require **System Settings → Privacy & Security → Open Anyway**. Do not disable Gatekeeper.
 3. Follow Setup Guide to download the private speech engine. The app checks free space, verifies the archive, installs it in Application Support, and runs a health check before using it.
 4. Choose a speech model. Qwen3-ASR 0.6B is the recommended download at approximately 1.9 GB. Qwen3-ASR 1.7B is approximately 4.3 GB and is best suited to Macs with at least 16 GB of unified memory.
-5. Grant Microphone and Accessibility access, or finish those steps later from **Settings → Permissions**.
+5. Grant Microphone and Accessibility access, or finish those steps later from **Settings → Permissions**. Two later steps are optional: **Screen & System Audio Recording**, which macOS requires only for system-audio dictation, and **Learn from edits**, which keeps corrected sentences and their recordings on this Mac (off by default).
 
 The native app, speech engine, and model are separate. The engine and model are downloaded only when needed, remain on your Mac, and survive normal app updates. The direct-download path requires no Python, Homebrew, pip, Xcode, Terminal, account, or audio upload. See the full [installation and recovery guide](INSTALL.md).
 

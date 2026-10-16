@@ -1,7 +1,9 @@
 import AVFoundation
 import SwiftUI
 
-/// First-run guided setup: welcome, the two permissions, preferences, done.
+/// First-run guided setup: welcome, the two required permissions, the
+/// optional system-audio permission, preferences, an opt-in for learning
+/// from edits, done. The optional steps never block "Continue".
 ///
 /// Permission state is polled rather than pushed — macOS has no callback for
 /// Accessibility — so a card flips to "granted" on its own moments after the
@@ -24,7 +26,7 @@ struct OnboardingView: View {
     var onFinish: () -> Void
 
     enum Step: Int, CaseIterable {
-        case welcome, runtime, model, microphone, accessibility, preferences, oneWordLanguage, output, voiceShortcut, ready
+        case welcome, runtime, model, microphone, accessibility, systemAudio, preferences, oneWordLanguage, output, learning, voiceShortcut, ready
     }
 
     var body: some View {
@@ -38,9 +40,11 @@ struct OnboardingView: View {
                 case .model: modelStep
                 case .microphone: microphoneStep
                 case .accessibility: accessibilityStep
+                case .systemAudio: systemAudioStep
                 case .preferences: preferencesStep
                 case .oneWordLanguage: oneWordLanguageStep
                 case .output: outputStep
+                case .learning: learningStep
                 case .voiceShortcut: voiceShortcutStep
                 case .ready: readyStep
                 }
@@ -353,6 +357,43 @@ struct OnboardingView: View {
         }
     }
 
+    /// Optional. macOS routes system audio through Screen & System Audio
+    /// Recording, so the grant is offered where the feature is introduced,
+    /// but never required: Continue works without it, and Settings →
+    /// Permissions offers the same grant later.
+    private var systemAudioStep: some View {
+        StepLayout(
+            icon: "play.rectangle",
+            title: "Transcribe what your Mac plays",
+            blurb: "Optional. Dictate videos, calls, and podcasts. Only audio is captured."
+        ) {
+            VStack(spacing: 14) {
+                PermissionCard(
+                    title: "Screen & System Audio Recording",
+                    granted: permissions.screenCapture,
+                    denied: false,
+                    action: { permissions.requestScreenCapture() }
+                )
+
+                if permissions.screenCapture {
+                    Text("Press **⌥S** while dictating to switch sources.")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 12)
+                        .transition(.opacity)
+                } else {
+                    Text("You can skip this. Mic dictation doesn't need it.")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 12)
+                        .transition(.opacity)
+                }
+            }
+        }
+    }
+
     private var preferencesStep: some View {
         StepLayout(
             icon: "slider.horizontal.3",
@@ -472,6 +513,29 @@ struct OnboardingView: View {
                 Color.clear.frame(height: 12)
             }
             .onboardingSurface()
+            .frame(width: 430)
+        }
+    }
+
+    /// Opt-in, off by default. Learning from edits reads the pasted-into field
+    /// through the Accessibility grant already made and keeps the sample on
+    /// this Mac, so this step is consent and explanation, not a permission.
+    private var learningStep: some View {
+        StepLayout(
+            icon: "sparkles",
+            title: "Help WhisprStream learn",
+            blurb: "Optional. Fix a word after dictating, and WhisprStream learns from it."
+        ) {
+            VStack(spacing: 12) {
+                OnboardingToggleRow(
+                    symbol: "pencil.line",
+                    title: "Learn from my edits",
+                    detail: "Stays on this Mac. Review or delete anytime in Settings.",
+                    isOn: $settings.captureCorrections
+                )
+                .padding(.vertical, 4)
+                .onboardingSurface()
+            }
             .frame(width: 430)
         }
     }

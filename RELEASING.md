@@ -189,6 +189,12 @@ Before approving 1.0.4, exercise system-audio dictation with the built
 candidate on an account that has not yet granted Screen & System Audio
 Recording:
 
+- In Setup Guide, the optional **Screen & System Audio Recording** step must
+  show its card as not granted, **Continue** must work without granting, and
+  **Grant** must show the native prompt once and then open the Screen & System
+  Audio Recording pane. The later **Help WhisprStream learn** step must show
+  *Learn from edits I make* off by default and persist a change to
+  Settings → General → Uncertain words.
 - Choose **System audio** in Settings, grant access from the row there, and
   dictate while a video plays. The HUD must turn rainbow, the transcript must
   follow the video, and WhisprStream's own start/finish sounds must not appear.

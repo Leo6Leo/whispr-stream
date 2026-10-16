@@ -91,6 +91,20 @@ final class VoiceShortcutSettingsTests: XCTestCase {
         XCTAssertEqual(steps[preferencesIndex + 1], .oneWordLanguage)
     }
 
+    func testOptionalOnboardingStepsFollowTheirSubjects() throws {
+        let steps = OnboardingView.Step.allCases
+        let accessibilityIndex = try XCTUnwrap(steps.firstIndex(of: .accessibility))
+        let outputIndex = try XCTUnwrap(steps.firstIndex(of: .output))
+        let readyIndex = try XCTUnwrap(steps.firstIndex(of: .ready))
+
+        // The optional system-audio grant sits with the other permissions.
+        XCTAssertEqual(steps[accessibilityIndex + 1], .systemAudio)
+        // Learning from edits is introduced right after output choices.
+        XCTAssertEqual(steps[outputIndex + 1], .learning)
+        XCTAssertEqual(steps.last, .ready)
+        XCTAssertLessThan(try XCTUnwrap(steps.firstIndex(of: .learning)), readyIndex)
+    }
+
     func testFirstDictationCoachUsesSelectedKeyAndActivationMode() {
         XCTAssertEqual(
             FirstDictationCoachView.instruction(key: .rightOption, mode: .hold),
