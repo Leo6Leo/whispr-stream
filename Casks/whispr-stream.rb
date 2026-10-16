@@ -1,6 +1,6 @@
 cask "whispr-stream" do
   version "1.0.4"
-  sha256 "a7b4b0ba190c96ca80ea88f29128d835927689c16ab64ebbf9775173a9719f48"
+  sha256 "11c65536459997e8df6d4ea42d259c951a48145f46f2eb0268e8e1e46e9a3bcc"
 
   url "https://github.com/Leo6Leo/whispr-stream/releases/download/v#{version}/WhisprStream-macos-arm64.zip"
   name "WhisprStream"
