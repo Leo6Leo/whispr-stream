@@ -220,6 +220,11 @@ final class Settings: ObservableObject {
         didSet { defaults.set(usePunctuation, forKey: Keys.usePunctuation) }
     }
 
+    /// Drop hesitation sounds such as "um" and "呃" from finished dictations.
+    @Published var removeFillerWords: Bool {
+        didSet { defaults.set(removeFillerWords, forKey: Keys.removeFillerWords) }
+    }
+
     /// Match the transcript's opening capitalization to text at the active
     /// cursor. Apps without readable cursor context use a guarded keyboard
     /// probe that must finish before the transcript is inserted.
@@ -487,6 +492,7 @@ final class Settings: ObservableObject {
         static let reviewUncertainWords = "reviewUncertainWords.v1"
         static let learnFromCorrections = "learnFromCorrections.v1"
         static let usePunctuation = "usePunctuation"
+        static let removeFillerWords = "removeFillerWords"
         static let contextAwareCapitalization = "contextAwareCapitalization"
         static let shortUtteranceLanguage = "shortUtteranceLanguage"
         static let playSound = "playSound"
@@ -531,6 +537,7 @@ final class Settings: ObservableObject {
         reviewUncertainWords = defaults.bool(forKey: Keys.reviewUncertainWords)
         learnFromCorrections = defaults.bool(forKey: Keys.learnFromCorrections)
         usePunctuation = defaults.object(forKey: Keys.usePunctuation) as? Bool ?? true
+        removeFillerWords = defaults.object(forKey: Keys.removeFillerWords) as? Bool ?? true
         contextAwareCapitalization = defaults.object(
             forKey: Keys.contextAwareCapitalization
         ) as? Bool ?? false

@@ -888,8 +888,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshLearnedContext() { asr?.setLearnedContext(learnedContext) }
 
     private func prepareDelivery(_ text: String, review: DictationReview? = nil) -> DeferredTranscriptDelivery {
+        let fluent = settings.removeFillerWords ? FillerWordNormalizer.normalize(text) : text
         let normalized = SpokenSymbolNormalizer.normalize(
-            SpelledLetterNormalizer.normalize(SpokenNumberNormalizer.normalize(text))
+            SpelledLetterNormalizer.normalize(SpokenNumberNormalizer.normalize(fluent))
         )
         let formatted = TranscriptFormatter.format(normalized, usePunctuation: settings.usePunctuation)
         let expansion = TranscriptExpander.expand(formatted, using: settings.voiceShortcuts)

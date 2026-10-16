@@ -35,6 +35,14 @@ final class VoiceShortcutSettingsTests: XCTestCase {
         XCTAssertEqual(reloaded.asrContext, "Claude\nGitHub\nhaha github")
     }
 
+    func testRemoveFillerWordsDefaultsOnAndPersists() {
+        let defaults = makeDefaults()
+        let settings = Settings(defaults: defaults)
+        XCTAssertTrue(settings.removeFillerWords)
+        settings.removeFillerWords = false
+        XCTAssertFalse(Settings(defaults: defaults).removeFillerWords)
+    }
+
     func testContextAwareCapitalizationDefaultsOff() {
         XCTAssertFalse(Settings(defaults: makeDefaults()).contextAwareCapitalization)
     }

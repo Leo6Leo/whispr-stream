@@ -269,15 +269,20 @@ private struct GeneralTab: View {
                          : "Remove sentence-ending punctuation from dictation.")
                 }
 
+                Toggle(isOn: $settings.removeFillerWords) {
+                    HStack(spacing: 6) {
+                        Text("Remove filler words")
+                        BetaBadge()
+                    }
+                    Text(settings.removeFillerWords
+                         ? "Drop hesitations such as um, uh, and 呃."
+                         : "Keep hesitations exactly as transcribed.")
+                }
+
                 Toggle(isOn: $settings.contextAwareCapitalization) {
                     HStack(spacing: 6) {
                         Text("Context-aware capitalization")
-                        Text("Beta")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.orange)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.orange.opacity(0.14), in: Capsule())
+                        BetaBadge()
                     }
                     Text(settings.contextAwareCapitalization
                          ? "Match nearby text. This may add a brief delay in some apps."
@@ -1027,5 +1032,16 @@ struct AboutView: View {
                 .font(.system(size: 11.5, weight: .medium))
                 .frame(width: 210, alignment: .leading)
         }
+    }
+}
+
+private struct BetaBadge: View {
+    var body: some View {
+        Text("Beta")
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.orange)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.orange.opacity(0.14), in: Capsule())
     }
 }
