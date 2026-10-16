@@ -123,6 +123,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     private var capturedUtterance: CapturedUtterance?
     private var correctionCapture: CorrectionCaptureSession?
+    /// Start-of-utterance timing, logged once per dictation: when the first
+    /// microphone buffer arrived and when the first preview became visible.
+    private var dictationStartedAt: Date?
+    private var loggedFirstBuffer = false
+    private var loggedFirstPreview = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // The updater retains its rollback copy until this process proves that
@@ -144,6 +149,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         setUpStatusItem()
         setUpUpdateMonitoring()
+        // After hours of idle the first decode runs on evicted weights and
+        // cold kernels (measured ~650 ms instead of ~120 ms). Wake and unlock
+        // are the moments a long idle ends, so re-warm once there; the engine
+        // never runs idle inference on its own.
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        workspaceCenter.addObserver(
+            self, selector: #selector(rewarmSpeechEngine),
+            name: NSWorkspace.didWakeNotification, object: nil
+        )
+        workspaceCenter.addObserver(
+            self, selector: #selector(rewarmSpeechEngine),
+            name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil
+        )
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(rewarmSpeechEngine),
+            name: Notification.Name("com.apple.screenIsUnlocked"), object: nil
+        )
 
         let trusted = AXIsProcessTrusted()
         Log.write("launch: accessibility=\(trusted ? "granted" : "DENIED") "
@@ -374,6 +396,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.utteranceAudio.append(pcm)
             DispatchQueue.main.async {
                 guard let self, self.state.phase == .listening else { return }
+                if !self.loggedFirstBuffer, let started = self.dictationStartedAt {
+                    self.loggedFirstBuffer = true
+                    Log.write("first audio buffer \(Int(Date().timeIntervalSince(started) * 1000))ms after dictation start")
+                }
                 self.state.level = self.state.level * 0.55 + CGFloat(level) * 0.45
             }
         }
@@ -636,6 +662,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openOnboarding() { showOnboarding() }
 
+    /// Wake or unlock while idle: ask the engine for one short decode.
+    @objc private func rewarmSpeechEngine() {
+        guard state.phase == .idle, isASRReady, let asr else { return }
+        Log.write("speech engine re-warm requested after wake or unlock")
+        asr.warm()
+    }
+
     // MARK: - Dictation lifecycle
 
     @discardableResult
@@ -662,6 +695,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         correctionCapture = nil
         capturedUtterance = nil
         utteranceAudio.begin(retaining: settings.captureCorrections)
+        dictationStartedAt = Date()
+        loggedFirstBuffer = false
+        loggedFirstPreview = false
         cursorContextGeneration &+= 1
         resolvedPrecedingText = nil
         isResolvingPrecedingText = false
@@ -779,6 +815,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // nothing) would swap the line back to "Listening…" for a moment.
             // Keep the last words; the next preview or the final replaces them.
             if committed.isEmpty, tail.isEmpty, !state.displayText.isEmpty { return }
+            if !loggedFirstPreview, !(committed.isEmpty && tail.isEmpty), let started = dictationStartedAt {
+                loggedFirstPreview = true
+                Log.write("first preview \(Int(Date().timeIntervalSince(started) * 1000))ms after dictation start (\(committed.count + tail.count) chars)")
+            }
             state.committed = committed
             state.tail = tail
 

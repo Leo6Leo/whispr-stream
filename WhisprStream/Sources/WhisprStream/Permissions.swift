@@ -31,10 +31,17 @@ final class Permissions: ObservableObject {
     static var isScreenCaptureGranted: Bool { CGPreflightScreenCaptureAccess() }
 
     func refresh() {
-        microphone = AVCaptureDevice.authorizationStatus(for: .audio)
+        // Assign only on change. `@Published` publishes on every set, and the
+        // onboarding polls this every 0.6 s; republishing identical values
+        // re-rendered the whole Setup Guide on each tick, which made its
+        // looping welcome animation hitch.
+        let currentMicrophone = AVCaptureDevice.authorizationStatus(for: .audio)
+        if microphone != currentMicrophone { microphone = currentMicrophone }
         // Never prompt from a poll — the prompts are triggered explicitly below.
-        accessibility = AXIsProcessTrusted()
-        screenCapture = Self.isScreenCaptureGranted
+        let currentAccessibility = AXIsProcessTrusted()
+        if accessibility != currentAccessibility { accessibility = currentAccessibility }
+        let currentScreenCapture = Self.isScreenCaptureGranted
+        if screenCapture != currentScreenCapture { screenCapture = currentScreenCapture }
     }
 
     /// Polls while onboarding is on screen so cards update the moment a

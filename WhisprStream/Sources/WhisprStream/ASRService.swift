@@ -210,6 +210,10 @@ final class ASRService {
     /// so this is cheap enough to call on every keystroke in Settings.
     func setContext(_ terms: String) { send(["cmd": "context", "text": terms]) }
 
+    /// One short decode so the first preview after a long idle is not cold.
+    /// The sidecar ignores it during an utterance and rate-limits it.
+    func warm() { send(["cmd": "warm"]) }
+
     /// `pcm` must be mono 16 kHz signed 16-bit.
     func sendAudio(_ pcm: Data) {
         send(["cmd": "audio", "pcm": pcm.base64EncodedString()])

@@ -1092,31 +1092,45 @@ private struct ProgressDots: View {
 }
 
 /// Waveform bars that idle in a gentle loop — the welcome screen's mark.
+///
+/// Driven by a timeline clock rather than `repeatForever`: the Setup Guide
+/// re-renders while it polls permissions, and a re-applied repeating
+/// animation hitched on every re-render. Each bar breathes between 42% and
+/// 100% of its height on a 0.72 s ease-in-out half-cycle, 90 ms behind the
+/// bar before it, and holds still under Reduce Motion.
 private struct AnimatedMark: View {
-    @State private var animating = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var startedAt = Date()
     private let heights: [CGFloat] = [0.35, 0.62, 1.0, 0.72, 0.45]
+    private static let halfCycle: TimeInterval = 0.72
+    private static let stagger: TimeInterval = 0.09
 
     var body: some View {
-        HStack(spacing: 6) {
-            ForEach(heights.indices, id: \.self) { i in
-                Capsule()
-                    .fill(
-                        LinearGradient(
-                            colors: [Color.accentColor, Color.accentColor.opacity(0.65)],
-                            startPoint: .top, endPoint: .bottom
+        TimelineView(.animation(paused: reduceMotion)) { context in
+            let elapsed = context.date.timeIntervalSince(startedAt)
+            HStack(spacing: 6) {
+                ForEach(heights.indices, id: \.self) { i in
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [Color.accentColor, Color.accentColor.opacity(0.65)],
+                                startPoint: .top, endPoint: .bottom
+                            )
                         )
-                    )
-                    .frame(width: 8, height: 64 * heights[i] * (animating ? 1.0 : 0.42))
-                    .animation(
-                        .easeInOut(duration: 0.72)
-                            .repeatForever(autoreverses: true)
-                            .delay(Double(i) * 0.09),
-                        value: animating
-                    )
+                        .frame(width: 8, height: 64 * heights[i] * scale(at: elapsed, bar: i))
+                }
             }
         }
         .frame(height: 76)
-        .onAppear { animating = true }
+    }
+
+    /// 0.42…1.0 and back, ease-in-out, starting from rest like the old loop.
+    private func scale(at elapsed: TimeInterval, bar: Int) -> CGFloat {
+        guard !reduceMotion else { return 1 }
+        let local = max(0, elapsed - Double(bar) * Self.stagger)
+        let phase = (local / (2 * Self.halfCycle)).truncatingRemainder(dividingBy: 1)
+        let wave = 0.5 - 0.5 * cos(2 * .pi * phase)
+        return 0.42 + 0.58 * CGFloat(wave)
     }
 }
 

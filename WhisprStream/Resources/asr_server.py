@@ -1152,11 +1152,17 @@ class Server:
             if full_len < int(MIN_SECONDS * SAMPLE_RATE) or not grew:
                 time.sleep(POLL_INTERVAL)
                 continue
-            last_len = full_len
             if not has_speech(full_audio):
                 # Context terms are strong decoder hints, so never ask the
                 # model to interpret audio that contains only room tone.
+                # Re-check at the poll cadence rather than after another
+                # MIN_NEW_AUDIO of audio: counting a miss as "seen" made every
+                # soft first syllable cost 150 ms before the first preview.
+                if getattr(self, "_first_preview_pending", False):
+                    self._speech_gate_misses += 1
+                time.sleep(POLL_INTERVAL)
                 continue
+            last_len = full_len
             reusable = self._reusable_preview(full_audio, context_revision)
             if (
                 reusable is not None
@@ -1217,6 +1223,17 @@ class Server:
                         self._last_context_preview_len = full_len
                         self._last_context_preview_start = preview_start
                         self._last_context_preview_revision = context_revision
+                if self.active and getattr(self, "_first_preview_pending", False):
+                    self._first_preview_pending = False
+                    print(
+                        "[asr] first preview: "
+                        f"since_start={int((time.perf_counter() - self._utterance_started) * 1000)}ms "
+                        f"audio={full_len / SAMPLE_RATE:.2f}s "
+                        f"decode={int(decode_seconds * 1000)}ms "
+                        f"gate_misses={self._speech_gate_misses} chars={len(text)}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 if self.active:
                     emit({
                         "type": "partial",
@@ -1240,6 +1257,30 @@ class Server:
                 break
 
     # -- commands ------------------------------------------------------
+    def warm(self) -> None:
+        """Run one short decode so the first preview after a long idle does
+        not pay for evicted weights and cold kernels (measured: 659 ms vs
+        ~120 ms after nine idle hours). Sent by the app on wake and unlock;
+        skipped while an utterance is active or within a minute of the last
+        warm. Nothing is emitted; timing goes to the app log via stderr.
+        """
+        if self.active:
+            return
+        now = time.perf_counter()
+        if now - getattr(self, "_last_warm", float("-inf")) < 60:
+            return
+        self._last_warm = now
+        try:
+            self._decode_preview(np.zeros(int(0.5 * SAMPLE_RATE), dtype=np.float32), "")
+        except Exception as e:  # noqa: BLE001 - a failed warm must never surface
+            print(f"[asr] warm failed: {e}", file=sys.stderr, flush=True)
+            return
+        print(
+            f"[asr] warm: {int((time.perf_counter() - now) * 1000)}ms",
+            file=sys.stderr,
+            flush=True,
+        )
+
     def start(self, short_utterance_language: str | None = None) -> None:
         # A fast final can reach Swift before its superseded preview pass has
         # finished cleaning up. A new start command is already ordered ahead of
@@ -1267,6 +1308,11 @@ class Server:
         self.committed = ""
         self._prev = ""
         self._stabilizer = PreviewStabilizer()
+        # First-preview timing, reported once per utterance on stderr so the
+        # app log shows where a slow start spent its time.
+        self._utterance_started = time.perf_counter()
+        self._first_preview_pending = True
+        self._speech_gate_misses = 0
         requested_language = normalize_short_utterance_language(
             short_utterance_language
         )
@@ -1473,6 +1519,8 @@ def main() -> int:
                 server.set_context(msg.get("text", ""))
             elif cmd == "learned_context":
                 server.set_learned_context(msg.get("text", ""))
+            elif cmd == "warm":
+                server.warm()
             elif cmd == "quit":
                 break
         except Exception as e:

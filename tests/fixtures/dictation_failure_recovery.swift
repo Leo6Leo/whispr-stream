@@ -225,6 +225,7 @@ final class Harness {
     let runtime = RuntimeManager.shared, updates = AppUpdateManager()
     let utteranceAudio = ReviewAudioBuffer()
     var capturedUtterance: CapturedUtterance?, correctionCapture: CorrectionCaptureSession?
+    var dictationStartedAt: Date?, loggedFirstBuffer = false, loggedFirstPreview = false
     var asr: ASRService!, hotkey: HotKeyMonitor!
     var isASRReady = false, shouldShowFirstDictationCoach = false
     var hasResolvedPrecedingText = false, isResolvingPrecedingText = false
