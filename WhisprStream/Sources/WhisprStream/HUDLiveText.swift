@@ -8,6 +8,10 @@ enum HUDWordMotion {
     static let spring = Spring(response: 0.24, dampingRatio: 0.68)
     static let lift: CGFloat = 4
     static let initialScale: CGFloat = 0.94
+    /// A revised word is already being read, so it never leaves the screen:
+    /// it dips to this opacity and settles from this scale, with no lift.
+    static let revisionFloor: CGFloat = 0.6
+    static let revisionScale: CGFloat = 0.985
     /// Long enough for the last staggered word's spring to come to rest.
     static let retireAfter = LiveTextAnimation.maximumStagger + 0.55
 }
@@ -72,7 +76,7 @@ struct HUDLiveText: View {
         words.reduce(Text("")) { text, word in
             var part = Text(word.text).foregroundColor(color(of: word))
             if let startsAt = word.startsAt {
-                part = part.customAttribute(HUDWordArrival(startsAt: startsAt))
+                part = part.customAttribute(HUDWordArrival(startsAt: startsAt, isRevision: word.isRevision))
             }
             return text + part
         }
@@ -92,6 +96,7 @@ struct HUDLiveText: View {
 @available(macOS 15.0, *)
 private struct HUDWordArrival: TextAttribute {
     let startsAt: Date
+    let isRevision: Bool
 }
 
 @available(macOS 15.0, *)
@@ -111,12 +116,26 @@ private struct HUDWordRenderer: TextRenderer {
                     continue
                 }
                 let elapsed = now.timeIntervalSince(arrival.startsAt)
-                // Staggered words hold their place, invisible, until their turn.
+                let bounds = run.typographicBounds.rect
+                if arrival.isRevision {
+                    // The word was already on screen and changed. Refresh it
+                    // in place: a dip and a small settle, never a disappearance.
+                    let progress = HUDWordMotion.spring.value(target: 1.0, time: max(0, elapsed))
+                    let visible = min(1, max(0, progress))
+                    let scale = HUDWordMotion.revisionScale + (1 - HUDWordMotion.revisionScale) * progress
+                    var copy = context
+                    copy.opacity *= HUDWordMotion.revisionFloor + (1 - HUDWordMotion.revisionFloor) * visible
+                    copy.translateBy(x: bounds.midX, y: bounds.midY)
+                    copy.scaleBy(x: scale, y: scale)
+                    copy.translateBy(x: -bounds.midX, y: -bounds.midY)
+                    copy.draw(run)
+                    continue
+                }
+                // Staggered new words hold their place, invisible, until their turn.
                 guard elapsed > 0 else { continue }
                 // The underdamped spring overshoots slightly past 1, which
                 // gives scale and lift their bounce; opacity is clamped.
                 let progress = HUDWordMotion.spring.value(target: 1.0, time: elapsed)
-                let bounds = run.typographicBounds.rect
                 let scale = HUDWordMotion.initialScale + (1 - HUDWordMotion.initialScale) * progress
                 var copy = context
                 copy.opacity *= min(1, max(0, progress))

@@ -20,6 +20,10 @@ struct LiveTextAnimation {
         /// words from the same preview. Nil once settled.
         let startsAt: Date?
         let isCommitted: Bool
+        /// True when the word was already on screen and changed (a revised
+        /// spelling, a word that grew), as opposed to arriving new. Revisions
+        /// refresh in place; only new words fade in from nothing.
+        let isRevision: Bool
     }
 
     /// Words from one preview start 25 ms apart, bounded so a large result
@@ -30,6 +34,9 @@ struct LiveTextAnimation {
     private(set) var text: String
     private var characters: [Character]
     private var arrivals: [Date?]
+    /// Per character: inserted while other characters were removed from the
+    /// same region, that is, as a replacement rather than an append.
+    private var replaced: [Bool]
     /// How long an arrival stays live: the longest stagger plus the spring.
     private let retireAfter: TimeInterval
 
@@ -37,6 +44,7 @@ struct LiveTextAnimation {
         text = stableText
         characters = Array(stableText)
         arrivals = Array(repeating: nil, count: characters.count)
+        replaced = Array(repeating: false, count: characters.count)
         self.retireAfter = retireAfter
     }
 
@@ -52,15 +60,21 @@ struct LiveTextAnimation {
         return result
     }
 
-    /// Words with their staggered start times. A word animates whole if any
-    /// of its characters is new, so a revised word springs in again while
-    /// untouched neighbours stay put. Words never straddle `committedCount`,
+    /// Words with their staggered start times. A word animates whole when any
+    /// of its own letters is new, so a revised word springs in again while
+    /// untouched neighbours stay put. Trailing spaces and punctuation ride
+    /// with the word for layout but never replay it: the space that arrives
+    /// with the next word, or a period the model adds later, must not blink a
+    /// word the user has already read. Words never straddle `committedCount`,
     /// so each keeps a single style.
     func words(committedCount: Int) -> [Word] {
         var result: [Word] = []
         var staggerIndex: [Date: Int] = [:]
         for range in Self.wordRanges(in: characters, splittingAt: committedCount) {
-            let arrival = arrivals[range].compactMap { $0 }.max()
+            let core = range.filter { Self.isCJK(characters[$0]) || Self.isWordCharacter(characters[$0]) }
+            let source = core.isEmpty ? Array(range) : core
+            let fresh = source.filter { arrivals[$0] != nil }
+            let arrival = fresh.compactMap { arrivals[$0] }.max()
             var startsAt: Date?
             if let arrival {
                 let index = staggerIndex[arrival, default: 0]
@@ -69,10 +83,16 @@ struct LiveTextAnimation {
                     min(Double(index) * Self.stagger, Self.maximumStagger)
                 )
             }
+            // A word that kept some of its letters, or whose new letters took
+            // the place of removed ones, was already being read: it changed,
+            // it did not arrive.
+            let isRevision = arrival != nil
+                && (fresh.count < source.count || fresh.contains { replaced[$0] })
             result.append(Word(
                 text: String(characters[range]),
                 startsAt: startsAt,
-                isCommitted: range.lowerBound < committedCount
+                isCommitted: range.lowerBound < committedCount,
+                isRevision: isRevision
             ))
         }
         return result
@@ -88,6 +108,16 @@ struct LiveTextAnimation {
         // bounded to the recent tail even throughout uninterrupted speech.
         settle(at: now)
         guard text != newText else { return }
+        // The first words of an utterance appear at once. The capsule is
+        // already fading them in from "Listening…"; a stagger and a spring on
+        // top only delay the moment the user sees they were heard.
+        if characters.isEmpty {
+            characters = Array(newText)
+            arrivals = Array(repeating: nil, count: characters.count)
+            replaced = Array(repeating: false, count: characters.count)
+            text = newText
+            return
+        }
         let next = Array(newText)
         let prefix = zip(characters, next).prefix { $0 == $1 }.count
         var suffix = 0
@@ -112,12 +142,24 @@ struct LiveTextAnimation {
             }
         }
         var survivors = oldMiddle.indices.filter { !removed.contains($0) }
-            .map { arrivals[prefix + $0] }.makeIterator()
-        let middleArrivals: [Date?] = newMiddle.indices.map { index in
-            if inserted.contains(index) { return now }
-            return survivors.next() ?? nil
+            .map { (arrivals[prefix + $0], replaced[prefix + $0]) }.makeIterator()
+        // Insertions that coincide with removals are replacements; a region
+        // that only grew is an append.
+        let isReplacement = !removed.isEmpty
+        var middleArrivals: [Date?] = []
+        var middleReplaced: [Bool] = []
+        for index in newMiddle.indices {
+            if inserted.contains(index) {
+                middleArrivals.append(now)
+                middleReplaced.append(isReplacement)
+            } else {
+                let survivor = survivors.next() ?? (nil, false)
+                middleArrivals.append(survivor.0)
+                middleReplaced.append(survivor.1)
+            }
         }
         arrivals = Array(arrivals.prefix(prefix)) + middleArrivals + Array(arrivals.suffix(suffix))
+        replaced = Array(replaced.prefix(prefix)) + middleReplaced + Array(replaced.suffix(suffix))
         characters = next
         text = newText
     }
@@ -126,6 +168,7 @@ struct LiveTextAnimation {
         for index in arrivals.indices {
             if let arrival = arrivals[index], now.timeIntervalSince(arrival) >= retireAfter {
                 arrivals[index] = nil
+                replaced[index] = false
             }
         }
     }

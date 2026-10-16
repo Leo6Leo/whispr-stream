@@ -28,7 +28,6 @@ struct HUDView: View {
 
     @State private var history: [CGFloat] = []
     @State private var transcriptOverflows = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// The leading slot is sized per phase. Giving the checkmark the waveform's
     /// full width would strand ~29pt of dead space on either side of it.
@@ -223,6 +222,9 @@ struct HUDView: View {
                 startPoint: .leading,
                 endPoint: .trailing
             )
+            // The line crosses the window's edge once per utterance; fade the
+            // edge in rather than snapping the leftmost glyphs away.
+            .animation(.easeInOut(duration: 0.2), value: transcriptOverflows)
         }
     }
 
@@ -282,56 +284,51 @@ struct HUDView: View {
         }
     }
 
+    /// Microphone mode keeps the plain 1.0.3 bars: one height spring per bar
+    /// and nothing else in the chain. The rainbow bars, with their hue drift,
+    /// exist only while system audio is the source; the two sets swap with a
+    /// fade driven by the root `audioSource` animation.
+    @ViewBuilder
     private var waveform: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !isAnimatingRainbow)) { context in
-            let phase = RainbowPalette.phase(at: context.date)
-            HStack(alignment: .center, spacing: barSpacing) {
-                ForEach(0..<barCount, id: \.self) { index in
-                    bar(at: index, phase: phase)
+        if isRainbow {
+            TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !isAnimatingRainbow)) { context in
+                let phase = RainbowPalette.phase(at: context.date)
+                HStack(alignment: .center, spacing: barSpacing) {
+                    ForEach(0..<barCount, id: \.self) { index in
+                        rainbowBar(at: index, phase: phase)
+                    }
                 }
             }
+            .frame(width: waveformWidth, height: barMaxHeight)
+            .transition(.opacity)
+        } else {
+            HStack(alignment: .center, spacing: barSpacing) {
+                ForEach(0..<barCount, id: \.self) { index in
+                    Capsule(style: .continuous)
+                        .fill(Color.accentColor.opacity(0.9))
+                        .frame(width: barWidth, height: height(at: index))
+                        .animation(
+                            .spring(response: 0.28, dampingFraction: 0.62),
+                            value: height(at: index)
+                        )
+                }
+            }
+            .frame(width: waveformWidth, height: barMaxHeight)
+            .transition(.opacity)
         }
-        .frame(width: waveformWidth, height: barMaxHeight)
     }
-
-    /// Delay between neighbouring bars when the source switches, so the new
-    /// colour sweeps across the waveform the way words arrive in the
-    /// transcript: each on its own spring, a beat after the one before.
-    private static let sourceSweepStagger: TimeInterval = 0.028
 
     /// Colour lives outside the height spring. Inside it, every level update
     /// would carry the fill along on an underdamped spring, so the drifting
-    /// hue overshot its target and the bars shimmered. Two fills cross-fade on
-    /// a per-bar, staggered spring: the rainbow underneath and the accent on
-    /// top. Both fade, so in microphone mode no rainbow is left under the
-    /// accent to bleed through its 90% opacity or its anti-aliased ends. The
-    /// opacities only change on the source switch, so the 30 Hz hue ticks
-    /// never cut the sweep short. Each bar also lifts briefly as it passes.
-    private func bar(at index: Int, phase: Double) -> some View {
-        let delay = Double(index) * Self.sourceSweepStagger
-        let sweep = Animation.spring(response: 0.30, dampingFraction: 0.85).delay(delay)
-        return Capsule(style: .continuous)
+    /// hue overshot its target and the bars shimmered.
+    private func rainbowBar(at index: Int, phase: Double) -> some View {
+        Capsule(style: .continuous)
             .frame(width: barWidth, height: height(at: index))
             .animation(
                 .spring(response: 0.28, dampingFraction: 0.62),
                 value: height(at: index)
             )
             .foregroundStyle(rainbowBarColor(at: index, phase: phase))
-            .opacity(isRainbow ? 1 : 0)
-            .animation(sweep, value: isRainbow)
-            .overlay {
-                Capsule(style: .continuous)
-                    .fill(Color.accentColor.opacity(0.9))
-                    .opacity(isRainbow ? 0 : 1)
-                    .animation(sweep, value: isRainbow)
-            }
-            .phaseAnimator([false, true], trigger: settings.audioSource) { view, lifting in
-                view.scaleEffect(y: lifting && !reduceMotion ? 1.3 : 1)
-            } animation: { lifting in
-                lifting
-                    ? .spring(response: 0.14, dampingFraction: 0.8).delay(delay)
-                    : .spring(response: 0.34, dampingFraction: 0.6)
-            }
     }
 
     /// The bars span ~60% of the wheel so neighbours blend instead of

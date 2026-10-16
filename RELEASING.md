@@ -59,7 +59,7 @@ App version `1.0.4` intentionally reuses runtime version `1.0.0`; the runtime
 version changes only when the standalone Python or dependency payload changes.
 
 ```bash
-RELEASE=1 VERSION=1.0.4 BUILD_NUMBER=7 ENABLE_OPTIONAL_MODELS=0 \
+RELEASE=1 VERSION=1.0.4 BUILD_NUMBER=8 ENABLE_OPTIONAL_MODELS=0 \
 BUNDLE_IDENTIFIER="com.leoleo.whisprstream" \
 SIGNING_IDENTITY="WhisprStream Self-Signed" \
 RUNTIME_VERSION=1.0.0 \
@@ -104,7 +104,7 @@ shasum -a 256 WhisprStream-macos-arm64.zip \
   WhisprStream-runtime-1.0.0-arm64.zip > SHA256SUMS
 WhisprStream/validate-release.sh WhisprStream-macos-arm64.zip \
   WhisprStream-runtime-1.0.0-arm64.zip SHA256SUMS \
-  WhisprStream-macos-arm64.zip.ed25519 1.0.4 7
+  WhisprStream-macos-arm64.zip.ed25519 1.0.4 8
 ```
 
 ## Local updater dry runs
@@ -231,6 +231,13 @@ Also exercise these dictation regressions with the built candidate:
   probing, and final paste. The badge may update immediately, but the automatic
   window must wait until dictation and clipboard cleanup finish, then appear
   once. Include rapid consecutive dictations while an update is pending.
+- Update an installed 1.0.3 copy with **Install and Relaunch**. The 1.0.3
+  helper spawns the new app as its child, so the log must show
+  `update relaunch: spawned as a child of helper` followed by
+  `update relaunch: new instance pid=`, and the first dictation afterwards
+  must capture audio without quitting and reopening by hand. The relaunched
+  process's `launch:` line must report `responsible=` equal to its own pid.
+  An update performed by the 1.0.4 helper (LaunchServices) must not relaunch.
 - Check ordinary Spaces and another app's native full-screen Space, including
   switching Spaces during recording, on macOS 14 and a supported newer system.
   Pure lifecycle tests do not qualify real window visibility or focus behavior.
@@ -257,7 +264,7 @@ SDK explicitly, set `WHISPR_TEST_SWIFT_SDK` when running these Python tests.
 The standalone checks do not replace the complete Swift test suite or signed
 archive validation. Rebuild and sign the app archive from the qualified source;
 the previously checked-in 1.0.3 archive is not a 1.0.4 candidate. Increment the
-build number again if a build 7 candidate has already been distributed.
+build number again if a build 8 candidate has already been distributed. Build 7 was published briefly on 2026-10-16 and withdrawn; it must not be reused.
 
 ## 5. Website and update checks
 

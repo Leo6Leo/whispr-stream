@@ -11,9 +11,11 @@ import Foundation
 final class AudioCapture {
     private static let recoveryDelay: TimeInterval = 0.25
     private static let maximumRecoveryAttempts = 20
-    /// 100 ms per buffer at 16 kHz Int16 mono.
-    private static let bufferBytes: UInt32 = 3_200
-    private static let bufferCount = 3
+    /// 40 ms per buffer at 16 kHz Int16 mono. The HUD waveform advances one
+    /// bar per delivered buffer, so this cadence (25 Hz, close to the old
+    /// AVAudioEngine tap) is what keeps it fluid; 100 ms buffers made it step.
+    private static let bufferBytes: UInt32 = 1_280
+    private static let bufferCount = 4
 
     private static let format = AudioStreamBasicDescription(
         mSampleRate: 16_000,

@@ -61,10 +61,79 @@ final class LiveTextAnimationTests: XCTestCase {
     }
 
     func testLargeResultsCapTheStagger() {
-        var animation = LiveTextAnimation()
+        var animation = LiveTextAnimation(stableText: "Start ")
         let now = Date()
-        animation.update(to: (1...20).map { "w\($0)" }.joined(separator: " "), at: now)
+        animation.update(to: "Start " + (1...20).map { "w\($0)" }.joined(separator: " "), at: now)
         let last = animation.words(committedCount: 0).last?.startsAt
         XCTAssertEqual(last, now.addingTimeInterval(LiveTextAnimation.maximumStagger))
+    }
+
+    func testFirstPreviewOfAnUtteranceAppearsAtOnce() throws {
+        var animation = LiveTextAnimation()
+        let now = Date()
+        animation.update(to: "hello there world", at: now)
+        XCTAssertNil(animation.animationEnd, "the first words must not wait on a stagger or a spring")
+        XCTAssertTrue(animation.words(committedCount: 0).allSatisfy { $0.startsAt == nil })
+        XCTAssertEqual(animation.text, "hello there world")
+
+        // Everything after the first preview still springs in word by word.
+        animation.update(to: "hello there world again", at: now.addingTimeInterval(0.2))
+        let words = animation.words(committedCount: 0)
+        XCTAssertNil(words.first?.startsAt)
+        XCTAssertEqual(words.last?.text, "again")
+        let arrival = now.addingTimeInterval(0.2)
+        let startsAt = try XCTUnwrap(words.last?.startsAt)
+        XCTAssertGreaterThanOrEqual(startsAt, arrival)
+        XCTAssertLessThanOrEqual(startsAt, arrival.addingTimeInterval(LiveTextAnimation.maximumStagger))
+    }
+
+    func testAppendingAWordDoesNotReplayItsPredecessor() {
+        var animation = LiveTextAnimation(stableText: "hello there")
+        let now = Date()
+        animation.update(to: "hello there world", at: now)
+        let words = animation.words(committedCount: 0)
+        XCTAssertEqual(words.map(\.text), ["hello ", "there ", "world"])
+        // "there " gained its trailing space with this preview; the word the
+        // user already read must not blink because of it.
+        XCTAssertEqual(words.map(\.startsAt), [nil, nil, now])
+    }
+
+    func testRevisedWordsRefreshInPlaceWhileNewWordsArrive() {
+        // A word that grew keeps its letters: a revision, not an arrival.
+        var grown = LiveTextAnimation(stableText: "I want to go")
+        grown.update(to: "I want to going there", at: .now)
+        var words = grown.words(committedCount: 0)
+        XCTAssertEqual(words.map(\.text), ["I ", "want ", "to ", "going ", "there"])
+        XCTAssertEqual(words.map(\.isRevision), [false, false, false, true, false])
+        XCTAssertEqual(words.map { $0.startsAt != nil }, [false, false, false, true, true])
+
+        // A respelled word shares letters with its predecessor: a revision.
+        var respelled = LiveTextAnimation(stableText: "we meet Monday then")
+        respelled.update(to: "we meet Tuesday then", at: .now)
+        words = respelled.words(committedCount: 0)
+        XCTAssertEqual(words.filter(\.isRevision).map(\.text), ["Tuesday "])
+
+        // A word replaced outright still counts as a revision of what was there.
+        var swapped = LiveTextAnimation(stableText: "a cat sat")
+        swapped.update(to: "a dog sat", at: .now)
+        words = swapped.words(committedCount: 0)
+        XCTAssertEqual(words.filter(\.isRevision).map(\.text), ["dog "])
+
+        // Appending alone is an arrival: the new word fades in from nothing.
+        var appended = LiveTextAnimation(stableText: "hello there")
+        appended.update(to: "hello there world", at: .now)
+        words = appended.words(committedCount: 0)
+        XCTAssertEqual(words.map(\.isRevision), [false, false, false])
+        XCTAssertNotNil(words.last?.startsAt)
+    }
+
+    func testPunctuationAddedLaterDoesNotReplayTheWord() {
+        var animation = LiveTextAnimation(stableText: "we meet Monday")
+        animation.update(to: "we meet Monday.", at: .now)
+        XCTAssertTrue(animation.words(committedCount: 0).allSatisfy { $0.startsAt == nil })
+
+        var cjk = LiveTextAnimation(stableText: "我们明天")
+        cjk.update(to: "我们明天，", at: .now)
+        XCTAssertTrue(cjk.words(committedCount: 0).allSatisfy { $0.startsAt == nil })
     }
 }

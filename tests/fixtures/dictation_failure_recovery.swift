@@ -63,6 +63,7 @@ final class State {
     var level: CGFloat = 0
     var lastAudioSecs = 0.0, lastDurationMS = 0
     var committed = "", tail = "", timerRunning = false
+    var displayText: String { committed + tail }
     var notice: String?
     func showNotice(_ text: String, for duration: TimeInterval = 2.6) { notice = text }
     func startDictationTimer() { timerRunning = true }

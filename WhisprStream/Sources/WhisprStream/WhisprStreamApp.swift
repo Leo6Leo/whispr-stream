@@ -127,7 +127,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // The updater retains its rollback copy until this process proves that
         // AppKit reached the application delegate and stays alive briefly.
-        UpdateLaunchHealth.signalIfRequested()
+        // Read the parent before signalling: the helper that spawned us exits
+        // shortly after it sees the health token.
+        let parentProcess = getppid()
+        let launchedByUpdater = UpdateLaunchHealth.signalIfRequested()
+        // A pre-1.0.4 helper spawned us as its child, which leaves the
+        // microphone charged to the exited previous version; relaunch once
+        // through LaunchServices after that helper has finished.
+        UpdateRelaunch.performIfNeeded(launchedByUpdater: launchedByUpdater, parentProcess: parentProcess)
         mergeCrossBuildContentIfNeeded()
         panel = HUDPanel(state: state)
         state.onDictationLimitReached = { [weak self] in
@@ -768,6 +775,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         case let .partial(committed, tail):
             guard state.phase == .listening else { return }
+            // An empty preview mid-utterance (a breath the model heard as
+            // nothing) would swap the line back to "Listening…" for a moment.
+            // Keep the last words; the next preview or the final replaces them.
+            if committed.isEmpty, tail.isEmpty, !state.displayText.isEmpty { return }
             state.committed = committed
             state.tail = tail
 
