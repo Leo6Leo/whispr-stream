@@ -514,7 +514,7 @@ enum TextInserter {
         if let focused = focusedElementInExposedTree(application) {
             return focused
         }
-        guard enableManualAccessibilityIfSupported(application) else { return nil }
+        guard enableWebAccessibilityIfSupported(application) else { return nil }
         return focusedElementInExposedTree(application)
     }
 
@@ -534,24 +534,49 @@ enum TextInserter {
         return focusedEditableDescendant(of: window)
     }
 
-    private static func enableManualAccessibilityIfSupported(
+    static let manualAccessibilityAttribute = "AXManualAccessibility"
+    static let enhancedUserInterfaceAttribute = "AXEnhancedUserInterface"
+
+    /// Electron answers `AXManualAccessibility`. Chromium shells (Chrome, and
+    /// the ChatGPT desktop app built on it) report that attribute unsupported
+    /// and build their web tree only for `AXEnhancedUserInterface`. Prefer the
+    /// Electron switch: the enhanced flag also slows window-manager moves.
+    static func webAccessibilityAttribute(
+        manualSettable: Bool,
+        enhancedSettable: Bool
+    ) -> String? {
+        if manualSettable { return manualAccessibilityAttribute }
+        if enhancedSettable { return enhancedUserInterfaceAttribute }
+        return nil
+    }
+
+    /// Asks the app to expose its web contents. The flag stays on so later
+    /// dictations find the field at once; Chromium needs about three seconds
+    /// to build the tree, so the lookup right after this usually still fails.
+    private static func enableWebAccessibilityIfSupported(
         _ application: AXUIElement
     ) -> Bool {
-        let attribute = "AXManualAccessibility" as CFString
-        var settable = DarwinBoolean(false)
-        guard AXUIElementIsAttributeSettable(
+        func isSettable(_ name: String) -> Bool {
+            var settable = DarwinBoolean(false)
+            return AXUIElementIsAttributeSettable(application, name as CFString, &settable) == .success
+                && settable.boolValue
+        }
+        guard let attribute = webAccessibilityAttribute(
+            manualSettable: isSettable(manualAccessibilityAttribute),
+            enhancedSettable: isSettable(enhancedUserInterfaceAttribute)
+        ) else { return false }
+        // Setting the flag again while Chromium is still building the tree
+        // starts the build over, so a lookup retried every 0.5 s never finishes.
+        if (attributeValue(of: application, named: attribute) as? NSNumber)?.boolValue == true {
+            return true
+        }
+        guard AXUIElementSetAttributeValue(
             application,
-            attribute,
-            &settable
-        ) == .success,
-        settable.boolValue,
-        AXUIElementSetAttributeValue(
-            application,
-            attribute,
+            attribute as CFString,
             kCFBooleanTrue
         ) == .success else { return false }
 
-        Log.write("cursor context enabled manual accessibility for front app")
+        Log.write("cursor context enabled \(attribute) for front app")
         return true
     }
 

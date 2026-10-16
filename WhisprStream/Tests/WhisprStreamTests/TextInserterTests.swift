@@ -109,4 +109,23 @@ final class TextInserterTests: XCTestCase {
             )
         )
     }
+    func testElectronUsesManualAccessibility() {
+        XCTAssertEqual(
+            TextInserter.webAccessibilityAttribute(manualSettable: true, enhancedSettable: true),
+            TextInserter.manualAccessibilityAttribute
+        )
+    }
+
+    func testChromiumFallsBackToEnhancedUserInterface() {
+        // Chrome and the ChatGPT desktop app report AXManualAccessibility as
+        // unsupported; without this fallback their composer is never found.
+        XCTAssertEqual(
+            TextInserter.webAccessibilityAttribute(manualSettable: false, enhancedSettable: true),
+            TextInserter.enhancedUserInterfaceAttribute
+        )
+    }
+
+    func testNoWebAccessibilitySwitchWhenNeitherIsSettable() {
+        XCTAssertNil(TextInserter.webAccessibilityAttribute(manualSettable: false, enhancedSettable: false))
+    }
 }

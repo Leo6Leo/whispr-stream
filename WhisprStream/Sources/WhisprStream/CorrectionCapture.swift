@@ -156,7 +156,11 @@ enum CorrectionDiff {
 @MainActor
 final class CorrectionCaptureSession {
     static let baselinePollInterval: TimeInterval = 0.15
-    static let baselineTimeout: TimeInterval = 2.0
+    /// A missing field is looked up less often: each lookup may walk the tree.
+    static let elementRetryInterval: TimeInterval = 0.5
+    /// Covers the paste landing and, in Chromium apps (Chrome, ChatGPT), the
+    /// ~3 s the web tree takes to appear after dictation start switched it on.
+    static let baselineTimeout: TimeInterval = 4.0
     static let watchTimeout: TimeInterval = 120
     /// Web editors (ProseMirror in Claude) report an empty value for a moment
     /// while re-rendering after a paste. A clear counts only once it persists.
@@ -170,6 +174,7 @@ final class CorrectionCaptureSession {
     private var insertedRange: Range<String.Index>?
     private var latestNonEmpty: String?
     private var baselineDeadline: Date = .distantPast
+    private var lastElementLookup: Date = .distantPast
     private var pollWork: DispatchWorkItem?
     private var clearWork: DispatchWorkItem?
     private var timeoutWork: DispatchWorkItem?
@@ -186,14 +191,10 @@ final class CorrectionCaptureSession {
     /// recording the baseline. Returns false when nothing can be observed.
     @discardableResult
     func start() -> Bool {
-        guard AXIsProcessTrusted(), let element = TextInserter.focusedTextElement() else {
-            Log.write("correction capture: no focused accessibility element")
-            return false
-        }
-        self.element = element
+        guard AXIsProcessTrusted() else { return false }
         baselineDeadline = Date().addingTimeInterval(Self.baselineTimeout)
         pollForBaseline()
-        return true
+        return !finished
     }
 
     /// Ends the watch using the latest value seen. Safe to call repeatedly.
@@ -221,6 +222,12 @@ final class CorrectionCaptureSession {
 
     private func pollForBaseline() {
         guard !finished else { return }
+        // A Chromium app may still be building its tree; keep asking for the
+        // field until the deadline instead of giving up on the first miss.
+        if element == nil, Date().timeIntervalSince(lastElementLookup) >= Self.elementRetryInterval {
+            lastElementLookup = Date()
+            element = TextInserter.focusedTextElement()
+        }
         if let value = readValue(),
            let range = CorrectionDiff.insertedRange(of: insertedText, in: value, caret: readCaret()) {
             baseline = value
@@ -231,7 +238,9 @@ final class CorrectionCaptureSession {
             return
         }
         guard Date() < baselineDeadline else {
-            Log.write("correction capture: inserted text never appeared in the focused field")
+            Log.write(element == nil
+                ? "correction capture: no focused accessibility element"
+                : "correction capture: inserted text never appeared in the focused field")
             finished = true
             onFinish(nil)
             return
