@@ -1,28 +1,21 @@
 import AVFoundation
 import Foundation
 
-/// Plays macOS's built-in alert sounds via AudioServices.
+/// Plays macOS's built-in alert sounds and the app's own sounds.
 ///
-/// `AudioServicesPlaySystemSound` comes from AudioToolbox, which AVFoundation
-/// re-exports — importing AVFoundation is enough.
+/// Each file gets one cached, pre-buffered `AVAudioPlayer`, so a cue starts
+/// without disk or decoder latency.
 ///
-/// The iOS shorthand of hardcoding a numeric id:
-///
-///     let systemSoundID: SystemSoundID = 1016   // iOS "tweet"
-///     AudioServicesPlaySystemSound(systemSoundID)
-///
-/// is silently a no-op on macOS: those ids aren't defined here, and macOS's own
-/// ids start at 4096 (`kSystemSoundID_UserPreferredAlert`). On macOS you
-/// register a file first with `AudioServicesCreateSystemSoundID`, which hands
-/// back an id you then play.
-///
-/// Chosen over `AVAudioPlayer` because these *are* system alert sounds: they
-/// follow the user's alert-volume setting and duck correctly, which is the
-/// behaviour you want for a notification chime.
+/// This used to go through `AudioServicesPlaySystemSound`, which follows the
+/// alert-volume setting. On macOS 27.0.1 that API plays every sound twice
+/// (one call, one completion, two audible copies) while `afplay` and
+/// `AVAudioPlayer` play the same file once. The trade-off is that cues now
+/// follow output volume instead of alert volume. Playing in-process also
+/// keeps them inside `excludesCurrentProcessAudio` for system audio capture.
 final class SoundPlayer {
     static let shared = SoundPlayer()
 
-    private var ids: [String: SystemSoundID] = [:]
+    private var players: [String: AVAudioPlayer] = [:]
     private let lock = NSLock()
 
     private init() {}
@@ -75,45 +68,33 @@ final class SoundPlayer {
             ?? Bundle.main.url(forResource: file, withExtension: "caf")
     }
 
-    /// Registers a sound and caches its id. Safe to call repeatedly.
+    /// Loads a sound and caches its player. Safe to call repeatedly.
     @discardableResult
     func prepare(_ name: String) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-
-        if ids[name] != nil { return true }
-        guard let url = Self.resolve(name) else { return false }
-
-        var id: SystemSoundID = 0
-        let status = AudioServicesCreateSystemSoundID(url as CFURL, &id)
-        guard status == noErr else { return false }
-
-        ids[name] = id
-        return true
+        player(for: name) != nil
     }
 
     func play(_ name: String) {
-        guard prepare(name) else { return }
+        guard let player = player(for: name) else { return }
+        // Restart rather than overlap when the same cue fires again mid-play.
+        player.currentTime = 0
+        player.play()
+    }
+
+    private func player(for name: String) -> AVAudioPlayer? {
         lock.lock()
-        let id = ids[name]
-        lock.unlock()
-        guard let id else { return }
-        AudioServicesPlaySystemSound(id)
+        defer { lock.unlock() }
+
+        if let player = players[name] { return player }
+        guard let url = Self.resolve(name),
+              let player = try? AVAudioPlayer(contentsOf: url) else { return nil }
+        player.prepareToPlay()
+        players[name] = player
+        return player
     }
 
     /// Plays one of the app's own bundled sounds.
     func playBundled(_ file: String) { play(Self.bundledID(file)) }
 
     func prepareBundled(_ file: String) { prepare(Self.bundledID(file)) }
-
-    /// Whatever alert sound the user picked in System Settings → Sound.
-    func playUserAlert() {
-        AudioServicesPlaySystemSound(kSystemSoundID_UserPreferredAlert)
-    }
-
-    deinit {
-        for id in ids.values {
-            AudioServicesDisposeSystemSoundID(id)
-        }
-    }
 }
