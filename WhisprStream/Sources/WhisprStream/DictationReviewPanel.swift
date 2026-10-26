@@ -573,7 +573,11 @@ struct DictationReviewView: View {
         }
         let alternatives = picks.map { $0 == .alternative }
         let text = DictationReview.compose(reviews, alternatives: alternatives)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { finish(text, false, alternatives) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            // Editing during the beat takes over; the editor submits instead.
+            guard !isEditing else { return }
+            finish(text, false, alternatives)
+        }
     }
 
     private static let stepSpring = Animation.spring(response: 0.3, dampingFraction: 0.86)
@@ -598,7 +602,14 @@ struct DictationReviewView: View {
         if draft.isEmpty || draft == editBase { draft = base }
         editBase = base
         hovered = nil
-        withAnimation(Self.modeSpring) { isEditing = true }
+        // Opening the editor during a pick's confirmation beat cancels the
+        // step change or close that beat was waiting for. The pick itself is
+        // kept, but `chosen` must clear or every choice stays locked once the
+        // editor is left again.
+        withAnimation(Self.modeSpring) {
+            chosen = nil
+            isEditing = true
+        }
     }
 
     private func endEditing() {

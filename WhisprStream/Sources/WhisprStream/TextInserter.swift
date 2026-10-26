@@ -198,6 +198,9 @@ enum TextInserter {
         }
     }
 
+    /// How long after Cmd-V the pasteboard still belongs to the paste.
+    static let pasteSettleDelay: TimeInterval = 0.6
+
     private static func insert(
         _ text: String,
         retainOnClipboard: Bool,
@@ -225,9 +228,13 @@ enum TextInserter {
         // contents or nothing at all.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             transport.pressPaste(targetProcessID)
-            guard let saved else { completion?(); return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            // Completion lets the next dictation read the cursor, and that
+            // read can fall back to a Cmd-C probe that clears the pasteboard.
+            // Hold it until the destination has consumed the paste, whether
+            // or not the clipboard is restored afterwards.
+            DispatchQueue.main.asyncAfter(deadline: .now() + pasteSettleDelay) {
                 defer { completion?() }
+                guard let saved else { return }
                 // Do not overwrite a clipboard update made by the user or
                 // the destination app while the paste was in flight.
                 guard pb.changeCount == insertedChangeCount else {

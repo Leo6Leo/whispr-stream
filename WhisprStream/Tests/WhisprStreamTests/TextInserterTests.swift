@@ -151,6 +151,32 @@ final class TextInserterTests: XCTestCase {
         XCTAssertEqual(pasteboard.string(forType: .string), " Hello world")
     }
 
+    func testRetainedInsertionCompletesOnlyAfterThePasteSettles() {
+        let pasteboard = privatePasteboard()
+        defer { pasteboard.releaseGlobally() }
+        var pastedAt: Date?
+        var completedAt: Date?
+        let delivered = expectation(description: "delivered")
+        TextInserter.deliver(
+            "Hello world", insertionText: "Hello world ", insertAtCursor: true, copyToClipboard: true,
+            transport: .init(pasteboard: pasteboard, pressPaste: { _ in pastedAt = Date() })
+        ) {
+            completedAt = Date()
+            delivered.fulfill()
+        }
+        wait(for: [delivered], timeout: 3)
+        let pasted = try? XCTUnwrap(pastedAt)
+        let completed = try? XCTUnwrap(completedAt)
+        XCTAssertNotNil(pasted)
+        XCTAssertNotNil(completed)
+        if let pasted, let completed {
+            // A cursor probe started on completion must not clear the
+            // pasteboard while the destination is still reading the paste.
+            XCTAssertGreaterThanOrEqual(completed.timeIntervalSince(pasted),
+                                        TextInserter.pasteSettleDelay - 0.05)
+        }
+    }
+
     func testInsertionRestoresThePreviousClipboardWhenRetentionIsOff() {
         let pasteboard = privatePasteboard()
         defer { pasteboard.releaseGlobally() }

@@ -1,13 +1,15 @@
 // I/O doubles only. The Python runner inserts current production methods below.
 enum Phase: Equatable { case idle, listening, thinking, inserted, failed(String) }
-struct DictationReview: Equatable {}
+struct DictationReview: Equatable {
+    var recommendedText = "", alternativeText = ""
+}
 enum InjectedFailure: Error { case failed }
 enum Log { static func write(_ message: String) {} }
 
 final class ASRService {
     enum Event {
         case ready(ms: Int), partial(committed: String, tail: String)
-        case final(text: String, secs: Double, ms: Int, review: DictationReview?)
+        case final(text: String, secs: Double, ms: Int, reviews: [DictationReview])
         case error(String), terminated(String)
     }
     var onEvent: ((Event) -> Void)?
@@ -74,7 +76,7 @@ final class Settings {
     struct Model { let rawValue = "test" }
     let model = Model()
     var autoInsert = false, contextAwareCapitalization = false, isReloadingModel = false
-    var copyToClipboard = true
+    var copyToClipboard = true, playSound = true
     var audioSource: AudioSource = .microphone, captureCorrections = false
     var reviewUncertainWords = false, learnFromCorrections = true, isCapturingTriggerShortcut = false
     var triggerShortcut = 0, activationMode = 0, shortUtteranceLanguage = "auto"
@@ -162,13 +164,14 @@ enum TextInserter {
     }
 }
 final class DictationReviewPanel {
-    let completion: (String?, Bool) -> Void
+    let completion: (String?, Bool, [Bool]) -> Void
     var cancellations = 0
-    init(review: DictationReview, savesChoices: Bool, completion: @escaping (String?, Bool) -> Void) {
+    init(reviews: [DictationReview], savesChoices: Bool, playsSound: Bool,
+         completion: @escaping (String?, Bool, [Bool]) -> Void) {
         self.completion = completion
     }
     func show() {}
-    func cancel() { cancellations += 1; completion(nil, false) }
+    func cancel() { cancellations += 1; completion(nil, false, []) }
 }
 final class CorrectionStore {
     static let shared = CorrectionStore()
@@ -253,8 +256,8 @@ final class Harness {
     func scheduleAutomaticUpdatePrompt() {}
     func markFirstDictationCoachHandled() {}
     func presentFirstDictationCoachIfReady() {}
-    func prepareDelivery(_ text: String, review: DictationReview? = nil) -> DeferredTranscriptDelivery {
-        DeferredTranscriptDelivery(text: text, adjustForCursor: false, review: review)
+    func prepareDelivery(_ text: String, reviews: [DictationReview] = []) -> DeferredTranscriptDelivery {
+        DeferredTranscriptDelivery(text: text, adjustForCursor: false, reviews: reviews)
     }
 
     // PRODUCTION_METHODS
@@ -294,7 +297,7 @@ case "background-startup":
     for _ in 0..<2 {
         check(app.beginDictation(), "resident engine starts on first shortcut")
         app.endDictation()
-        service.onEvent?(.final(text: "", secs: 1, ms: 1, review: nil))
+        service.onEvent?(.final(text: "", secs: 1, ms: 1, reviews: []))
     }
     check(app.services.count == 1 && app.isASRReady, "readiness remains valid between dictations")
 case "record-during-startup":
@@ -321,7 +324,7 @@ case "release-during-startup":
     check(!app.beginDictation(), "pending cold-start final cannot be replaced")
     service.onEvent?(.ready(ms: 1))
     check(app.state.phase == .thinking && app.panel.isVisible, "readiness does not dismiss pending transcript")
-    service.onEvent?(.final(text: "first words", secs: 1, ms: 1, review: nil))
+    service.onEvent?(.final(text: "first words", secs: 1, ms: 1, reviews: []))
     check(app.delivered == ["first words"], "cold-start utterance delivers without another shortcut")
 case "record-during-reload":
     let app = readyApp()
@@ -331,7 +334,7 @@ case "record-during-reload":
     app.asr.onEvent?(.ready(ms: 1))
     check(!app.settings.isReloadingModel && app.state.phase == .listening, "reload readiness preserves recording")
     app.endDictation()
-    app.asr.onEvent?(.final(text: "new model", secs: 1, ms: 1, review: nil))
+    app.asr.onEvent?(.final(text: "new model", secs: 1, ms: 1, reviews: []))
     check(app.delivered == ["new model"], "replacement model delivers queued dictation")
 case "failures":
     for phase in [Phase.listening, .thinking, .idle] {
@@ -378,10 +381,10 @@ case "late-events":
     old.onEvent?(.terminated("stale exit"))
     check(app.state.phase == .listening && app.state.committed.isEmpty, "old callbacks cannot corrupt the recording")
     app.endDictation()
-    old.onEvent?(.final(text: "stale final", secs: 1, ms: 1, review: nil))
+    old.onEvent?(.final(text: "stale final", secs: 1, ms: 1, reviews: []))
     old.onEvent?(.ready(ms: 1))
     check(app.delivered.isEmpty && app.state.phase == .thinking, "old final/readiness cannot consume new session")
-    fresh.onEvent?(.final(text: "current", secs: 1, ms: 1, review: nil))
+    fresh.onEvent?(.final(text: "current", secs: 1, ms: 1, reviews: []))
     check(app.delivered == ["current"], "only current final is delivered")
 case "retry":
     let app = listeningApp()
@@ -430,7 +433,7 @@ case "microphone-failure":
     released.endDictation()
     released.capture.onFailure?(InjectedFailure.failed)
     check(released.asr === pending && released.state.phase == .thinking, "late microphone failure cannot abort a finalizing utterance")
-    pending.onEvent?(.final(text: "kept", secs: 1, ms: 1, review: nil))
+    pending.onEvent?(.final(text: "kept", secs: 1, ms: 1, reviews: []))
     check(released.delivered == ["kept"], "transcript survives a late microphone failure")
     let route = listeningApp()
     route.capture.onFailure?(InjectedFailure.failed)
@@ -440,19 +443,19 @@ case "review-cancel":
     app.state.phase = .thinking
     let target = TargetApplication()
     app.reviewTarget = TextInserter.ReviewTarget(application: target)
-    app.presentReview(DictationReview(), precedingText: nil)
+    app.presentReview([DictationReview()], precedingText: nil)
     let review = app.reviewPanel!
     app.asr.onEvent?(.terminated("injected"))
     check(review.cancellations == 1 && app.reviewPanel == nil && app.reviewTarget == nil, "failure closes pending review")
-    review.completion("stale selection", false)
+    review.completion("stale selection", false, [])
     check(app.delivered.isEmpty && CorrectionStore.shared.records == 0, "stale review cannot insert or learn text")
     check(target.activations == 0 && app.state.phase == .failed("injected"), "cancel callback cannot reactivate target or overwrite failure")
 case "review-restore":
     let app = readyApp()
     app.settings.autoInsert = true
     app.state.phase = .thinking
-    app.presentReview(DictationReview(), precedingText: nil)
-    app.reviewPanel!.completion("chosen", false)
+    app.presentReview([DictationReview()], precedingText: nil)
+    app.reviewPanel!.completion("chosen", false, [])
     check(TextInserter.restorationIsCurrent?() == true, "live review can restore focus")
     app.asr.onEvent?(.error("injected"))
     check(TextInserter.restorationIsCurrent?() == false, "focus restoration observes engine invalidation")
@@ -467,9 +470,9 @@ case "review-insert", "review-fallback":
     TextInserter.contextSnapshot = TextInserter.ReviewTarget(application: target)
     check(app.beginDictation(), "review dictation starts")
     app.endDictation()
-    app.asr.onEvent?(.final(text: "uncertain", secs: 1, ms: 1, review: DictationReview()))
+    app.asr.onEvent?(.final(text: "uncertain", secs: 1, ms: 1, reviews: [DictationReview()]))
     check(app.reviewPanel != nil && app.delivered.isEmpty, "uncertain text waits for confirmation")
-    app.reviewPanel!.completion("confirmed choice", false)
+    app.reviewPanel!.completion("confirmed choice", false, [])
     check(app.reviewPanel == nil && app.delivered.isEmpty, "confirmation waits for focus before inserting")
     check(TextInserter.restorationTarget?.application === target, "confirmation restores the dictation target")
     if scenario == "review-fallback" { TextInserter.restoreResult = nil }
@@ -505,7 +508,7 @@ case "normal":
     app.endDictation()
     check(!app.capture.capturing && !app.state.timerRunning, "normal release stops recording")
     check(app.state.phase == .thinking && service.stops == 1 && service.shutdowns == 0, "normal release finalizes without retiring engine")
-    service.onEvent?(.final(text: "normal", secs: 1, ms: 1, review: nil))
+    service.onEvent?(.final(text: "normal", secs: 1, ms: 1, reviews: []))
     check(app.delivered == ["normal"], "normal final still delivers")
 case "retry-failure-dismiss":
     let app = readyApp()
@@ -529,7 +532,7 @@ case "clipboard-probe-waits":
     check(app.beginDictation() && app.capture.capturing, "next recording starts without waiting for clipboard")
     check(TextInserter.contextCompletions.isEmpty, "next probe cannot touch clipboard before first paste completes")
     app.endDictation()
-    app.asr.onEvent?(.final(text: "second", secs: 1, ms: 1, review: nil))
+    app.asr.onEvent?(.final(text: "second", secs: 1, ms: 1, reviews: []))
     check(app.delivered == ["first"], "second final waits for previous paste")
     TextInserter.finishDelivery()
     check(TextInserter.contextCompletions.count == 1, "completed paste starts exactly one waiting probe")
@@ -544,7 +547,7 @@ case "clipboard-final-waits":
     app.deliverFinalTranscript("first", precedingText: nil, adjustForCursor: false)
     check(app.beginDictation(), "new recording is allowed with context feature off")
     app.endDictation()
-    app.asr.onEvent?(.final(text: "second", secs: 1, ms: 1, review: nil))
+    app.asr.onEvent?(.final(text: "second", secs: 1, ms: 1, reviews: []))
     check(app.delivered == ["first"], "even a final without a probe waits for the previous clipboard operation")
     TextInserter.finishDelivery()
     check(app.delivered == ["first", "second"], "queued final resumes when clipboard is free")
@@ -577,7 +580,7 @@ case "deferred-probe-cancelled":
             check(app.beginDictation(), "recording starts during previous delivery")
             if finalAlreadyReceived {
                 app.endDictation()
-                app.asr.onEvent?(.final(text: "aborted", secs: 1, ms: 1, review: nil))
+                app.asr.onEvent?(.final(text: "aborted", secs: 1, ms: 1, reviews: []))
             }
             if reload { app.reloadASR() } else { app.asr.onEvent?(.error("injected")) }
             TextInserter.finishDelivery()
@@ -635,7 +638,7 @@ case "correction-capture":
     check(app.beginDictation() && app.utteranceAudio.begins == 1, "dictation start resets the held audio")
     app.capture.onBuffer?(Data([1, 2, 3, 4]), 0.5)
     app.endDictation()
-    app.asr.onEvent?(.final(text: "raw words", secs: 1, ms: 1, review: nil))
+    app.asr.onEvent?(.final(text: "raw words", secs: 1, ms: 1, reviews: []))
     check(app.utteranceAudio.snapshot().isEmpty && app.capturedUtterance == nil, "final result hands the audio to the delivery and releases it")
     check(app.delivered == ["raw words"] && app.correctionCapture == nil, "the watch waits for the paste to land")
     check(app.beginDictation() && app.capturedUtterance == nil, "next dictation starts during the paste without inheriting the utterance")
@@ -643,7 +646,7 @@ case "correction-capture":
     let session = app.correctionCapture
     check(session?.insertedText == "raw words", "completed paste watches the inserted text")
     app.endDictation()
-    app.asr.onEvent?(.final(text: "", secs: 1, ms: 1, review: nil))
+    app.asr.onEvent?(.final(text: "", secs: 1, ms: 1, reviews: []))
     session?.finishResult = CapturedCorrection(inserted: "raw words", corrected: "row words")
     check(app.beginDictation(), "a new dictation settles the watched field")
     check(app.correctionCapture == nil && session?.finished == true, "new dictation ends the previous watch exactly once")
@@ -652,7 +655,7 @@ case "correction-capture":
     ], "a confined edit becomes one training sample with the raw transcript")
     check(TrainingDataStore.shared.audioBytes == 4, "the sample carries the utterance audio")
     app.endDictation()
-    app.asr.onEvent?(.final(text: "", secs: 1, ms: 1, review: nil))
+    app.asr.onEvent?(.final(text: "", secs: 1, ms: 1, reviews: []))
     check(app.beginDictation() && TrainingDataStore.shared.samples.count == 1, "a settled watch cannot save twice")
     let off = readyApp()
     off.settings.autoInsert = true
@@ -660,7 +663,7 @@ case "correction-capture":
     off.capture.onBuffer?(Data([9, 9]), 0.5)
     check(off.utteranceAudio.snapshot().isEmpty, "capture off never holds audio in memory")
     off.endDictation()
-    off.asr.onEvent?(.final(text: "plain", secs: 1, ms: 1, review: nil))
+    off.asr.onEvent?(.final(text: "plain", secs: 1, ms: 1, reviews: []))
     check(off.capturedUtterance == nil, "capture off records no utterance")
     TextInserter.finishDelivery()
     check(off.correctionCapture == nil && TrainingDataStore.shared.samples.count == 1, "capture off never watches the field")
