@@ -220,6 +220,28 @@ final class CorrectionCaptureTests: XCTestCase {
         XCTAssertTrue(CorrectionDiff.caretLeftSpan(caret: 9, span: span))
     }
 
+    func testFixInsideAMultiLineInsertion() {
+        let inserted = "Ship it with codex\nand review later"
+        let result = diff(
+            baseline: "# Notes\n" + inserted + "\nEnd",
+            inserted: inserted,
+            current: "# Notes edited\nShip it with Codex\nand review later\nEnd\nMore"
+        )
+        XCTAssertEqual(result, CapturedCorrection(
+            inserted: inserted,
+            corrected: "Ship it with Codex\nand review later"
+        ))
+    }
+
+    func testMultiLineSpanFollowsLinesThatMoved() {
+        let baseline = Array("a\nfirst line\nsecond line\nz")
+        let current = Array("new\na\nfirst line\nsecond line\nz")
+        let span = 2..<24
+        XCTAssertEqual(String(baseline[span]), "first line\nsecond line")
+        let located = CorrectionDiff.currentSpan(baseline: baseline, span: span, current: current)
+        XCTAssertEqual(located.map { String(current[$0]) }, "first line\nsecond line")
+    }
+
     func testAccessibilityCaretIsConvertedFromUTF16() {
         // Two emoji are four UTF-16 units but two Characters.
         let field = "👍👍 nice. Hello world"

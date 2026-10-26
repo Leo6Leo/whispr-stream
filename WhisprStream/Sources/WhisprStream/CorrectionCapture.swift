@@ -127,8 +127,10 @@ enum CorrectionDiff {
     /// Where the inserted span stands in `current`. Only the span's own line
     /// is aligned character by character; the other lines may have been
     /// edited, re-rendered by a live-preview editor, or scrolled in and out of
-    /// an editor that exposes just its viewport. Returns nil when no line in
-    /// `current` resembles the span's line any more.
+    /// an editor that exposes just its viewport. A span that itself contains
+    /// line breaks is matched as the same number of consecutive lines.
+    /// Returns nil when nothing in `current` resembles the span's lines any
+    /// more.
     static func currentSpan(
         baseline base: [Character],
         span: Range<Int>,
@@ -144,13 +146,14 @@ enum CorrectionDiff {
         let line = Array(base[lineStart..<lineEnd])
         let local = (span.lowerBound - lineStart)..<(span.upperBound - lineStart)
         let lineIndex = base[..<lineStart].reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
+        let lineCount = line.reduce(1) { $0 + ($1 == "\n" ? 1 : 0) }
 
         // Rank the current lines by what they share with the span's line at
         // either end, align the best few, and keep the closest in edit
         // distance. Ties go to the line nearest the original position.
         // Each line is scored once, in place: this runs on every caret move,
         // and a long note has thousands of lines.
-        let candidates = lineRanges(of: now)
+        let candidates = blockRanges(of: now, lines: lineCount)
         let scores = candidates.map { sharedEdges(line[...], now[$0]) }
         let ranked = candidates.indices.sorted { lhs, rhs in
             if scores[lhs] != scores[rhs] { return scores[lhs] > scores[rhs] }
@@ -295,6 +298,15 @@ enum CorrectionDiff {
         }
         ranges.append(start..<text.count)
         return ranges
+    }
+
+    /// Every run of `count` consecutive lines in `text`, newlines between
+    /// them included. Fewer lines than that gives the whole text.
+    private static func blockRanges(of text: [Character], lines count: Int) -> [Range<Int>] {
+        let lines = lineRanges(of: text)
+        guard count > 1 else { return lines }
+        guard lines.count >= count else { return [0..<text.count] }
+        return (0...(lines.count - count)).map { lines[$0].lowerBound..<lines[$0 + count - 1].upperBound }
     }
 
     private static func sharedEdges(_ a: ArraySlice<Character>, _ b: ArraySlice<Character>) -> Int {

@@ -117,7 +117,8 @@ struct DictationReviewView: View {
     @State private var resetToken = 0
 
     /// The sentence previews whichever word the pointer is on. With nothing
-    /// hovered it shows the best guess, which is also what Return inserts.
+    /// hovered it shows this word's earlier answer or the best guess. Return
+    /// inserts whatever this shows, so the highlighted card is what it keeps.
     private var shown: Choice { chosen ?? hovered ?? pick(at: step) ?? .preferred }
 
     private func pick(at index: Int) -> Choice? {
@@ -281,7 +282,7 @@ struct DictationReviewView: View {
             let gap: String
             if index + 1 < reviews.count {
                 let next = reviews[index + 1]
-                gap = String(item.suffix.dropLast(next.preferred.count + next.suffix.count))
+                gap = Self.middleContext(String(item.suffix.dropLast(next.preferred.count + next.suffix.count)))
             } else {
                 gap = Self.trailingContext(item.suffix)
             }
@@ -304,6 +305,17 @@ struct DictationReviewView: View {
         return "…" + tail.drop(while: \.isWhitespace)
     }
 
+    /// Text between two asked-about words keeps its ends and drops the middle
+    /// once it is longer than both context sides together, so a long
+    /// dictation cannot grow the card past the screen.
+    static func middleContext(_ gap: String) -> String {
+        guard gap.count > contextLength * 2 else { return gap }
+        let head = String(gap.prefix(contextLength))
+        let tail = String(gap.suffix(contextLength))
+        return String(head.reversed().drop(while: \.isWhitespace).reversed()) + " … "
+            + tail.drop(while: \.isWhitespace)
+    }
+
     private static func trailingContext(_ suffix: String) -> String {
         guard suffix.count > contextLength else { return suffix }
         let head = String(suffix.prefix(contextLength))
@@ -318,9 +330,9 @@ struct DictationReviewView: View {
             VStack(spacing: 8) { choiceButtons }
         }
         .background {
-            // Return keeps what is shown, like a default button: the best
-            // guess, or this word's earlier answer when the user stepped back.
-            Button("") { choose(pick(at: step) ?? .preferred) }
+            // Return keeps what is shown, like a default button: the hovered
+            // card, this word's earlier answer, or the best guess.
+            Button("") { choose(shown) }
                 .keyboardShortcut(.defaultAction)
                 .opacity(0)
                 .accessibilityHidden(true)
@@ -562,7 +574,7 @@ struct DictationReviewView: View {
         let answered = step
         if answered + 1 < reviews.count {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.26) {
-                guard step == answered, !isEditing else { return }
+                guard step == answered, !isEditing, chosen == choice else { return }
                 direction = 1
                 hovered = nil
                 withAnimation(Self.stepSpring) {
@@ -576,7 +588,10 @@ struct DictationReviewView: View {
         let text = DictationReview.compose(reviews, alternatives: alternatives)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             // Editing during the beat takes over; the editor submits instead.
-            guard !isEditing else { return }
+            // Leaving the editor again clears `chosen`, and a pick on another
+            // step means this one is stale, so both must still hold.
+            guard !isEditing, chosen == choice, step == answered,
+                  picks.map({ $0 == .alternative }) == alternatives else { return }
             finish(text, false, alternatives)
         }
     }
