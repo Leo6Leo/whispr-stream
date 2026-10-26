@@ -138,4 +138,85 @@ final class CorrectionCaptureTests: XCTestCase {
         XCTAssertEqual(CorrectionDiff.editDistance(Array("have"), Array("Hevy")), 3)
         XCTAssertEqual(CorrectionDiff.editDistance([], Array("abc")), 3)
     }
+
+    // MARK: Document editors: the rest of the field keeps changing while the span is fixed.
+
+    private let document = "# PRD\n\n- Goals\n"
+    private let spoken = "We will run it on the Raspberry Py with the Engineering NAS."
+    private let fixedSpoken = "We will run it on the Raspberry Pi with the Engineering MaaS."
+
+    func testFixSurvivesEnterAfterTheSpan() {
+        XCTAssertEqual(diff(baseline: document + spoken + " ", inserted: spoken,
+                            current: document + fixedSpoken + " \n")?.corrected, fixedSpoken)
+    }
+
+    func testFixSurvivesANewBulletTypedBelow() {
+        XCTAssertEqual(diff(baseline: document + spoken + " ", inserted: spoken,
+                            current: document + fixedSpoken + " \n- next item")?.corrected, fixedSpoken)
+    }
+
+    func testFixSurvivesASecondSentenceTypedAfterTheSpan() {
+        XCTAssertEqual(diff(baseline: document + spoken + " ", inserted: spoken,
+                            current: document + fixedSpoken + " It ships in May.")?.corrected, fixedSpoken)
+    }
+
+    func testFixSurvivesALivePreviewMarkerChangeOnTheSameLine() {
+        XCTAssertEqual(diff(baseline: "- " + spoken + " ", inserted: spoken,
+                            current: "\u{2022} " + fixedSpoken + " ")?.corrected, fixedSpoken)
+    }
+
+    func testFixSurvivesAnotherLineReRendering() {
+        XCTAssertEqual(diff(baseline: "PRD\n" + spoken + " ", inserted: spoken,
+                            current: "# PRD\n" + fixedSpoken + " ")?.corrected, fixedSpoken)
+    }
+
+    func testFixSurvivesAScrolledEditorViewport() {
+        XCTAssertEqual(diff(baseline: "line A\nline B\n" + spoken + " ", inserted: spoken,
+                            current: "line B\n" + fixedSpoken + " \nline D")?.corrected, fixedSpoken)
+    }
+
+    func testFixSurvivesTypingBeforeTheSpan() {
+        XCTAssertEqual(diff(baseline: "Notes\n" + spoken, inserted: spoken,
+                            current: "Notes today\n" + fixedSpoken)?.corrected, fixedSpoken)
+    }
+
+    func testTextTypedAfterAnUnpaddedSpanIsNotAbsorbedIntoTheCorrection() {
+        // No trailing space in the field: the next bullet used to be glued
+        // onto the corrected transcript.
+        XCTAssertEqual(diff(baseline: document + spoken, inserted: spoken,
+                            current: document + fixedSpoken + "\n- next item")?.corrected, fixedSpoken)
+    }
+
+    func testLettersTypedAgainstTheLastWordStayInTheCorrection() {
+        let inserted = "run Py on the NAS"
+        XCTAssertEqual(diff(baseline: inserted, inserted: inserted, current: "run Pi on the NASA")?.corrected,
+                       "run Pi on the NASA")
+    }
+
+    func testUnchangedSpanInAnEditedDocumentIsNotACorrection() {
+        XCTAssertNil(diff(baseline: document + spoken + " ", inserted: spoken,
+                          current: "# PRD v2\n\n- Goals\n- Scope\n" + spoken + " \nmore"))
+    }
+
+    func testSpanWhoseLineDisappearedYieldsNothing() {
+        XCTAssertNil(diff(baseline: document + spoken + " ", inserted: spoken, current: document))
+    }
+
+    func testCurrentSpanFollowsALineThatMoved() {
+        let baseline = Array("a\nb\nHello world\n")
+        let current = Array("b\nHello world\nc\n")
+        let span = 4..<15
+        XCTAssertEqual(String(baseline[span]), "Hello world")
+        let located = CorrectionDiff.currentSpan(baseline: baseline, span: span, current: current)
+        XCTAssertEqual(located.map { String(current[$0]) }, "Hello world")
+    }
+
+    func testCaretJustAfterTheSpanIsStillInside() {
+        let span = 10..<30
+        XCTAssertFalse(CorrectionDiff.caretLeftSpan(caret: 30, span: span))
+        XCTAssertFalse(CorrectionDiff.caretLeftSpan(caret: 31, span: span))
+        XCTAssertFalse(CorrectionDiff.caretLeftSpan(caret: 15, span: span))
+        XCTAssertTrue(CorrectionDiff.caretLeftSpan(caret: 32, span: span))
+        XCTAssertTrue(CorrectionDiff.caretLeftSpan(caret: 9, span: span))
+    }
 }

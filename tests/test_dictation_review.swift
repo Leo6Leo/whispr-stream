@@ -21,6 +21,27 @@ struct DictationReviewChecks {
         check(review.term(in: "completely rewritten") == nil, "do not guess a manual replacement")
         check(!DictationReview.isTerm("\nCodex"), "reject multiline prompt terms")
         check(!DictationReview.isTerm("..."), "reject punctuation candidates")
+        let sentence = "Use Codex and Vim today"
+        let first: [String: String] = ["prefix": "Use ", "preferred": "Codex", "alternative": "Codec",
+                                       "suffix": " and Vim today"]
+        let second: [String: String] = ["prefix": "Use Codex and ", "preferred": "Vim", "alternative": "Emacs",
+                                        "suffix": " today"]
+        let several = DictationReview.parseAll([second, first], single: nil, transcript: sentence)
+        check(several.map(\.preferred) == ["Codex", "Vim"], "several words arrive in reading order")
+        check(DictationReview.compose(several, alternatives: [false, false]) == sentence, "best guesses rebuild the transcript")
+        check(DictationReview.compose(several, alternatives: [true, false]) == "Use Codec and Vim today", "first word alone")
+        check(DictationReview.compose(several, alternatives: [false, true]) == "Use Codex and Emacs today", "second word alone")
+        check(DictationReview.compose(several, alternatives: [true, true]) == "Use Codec and Emacs today", "both words")
+        check(DictationReview.parseAll([first, ["prefix": "x"]], single: nil, transcript: sentence).isEmpty,
+              "one malformed word rejects the whole set")
+        check(DictationReview.parseAll([first, first], single: nil, transcript: sentence).isEmpty,
+              "overlapping words are rejected")
+        check(DictationReview.parseAll(nil, single: payload, transcript: review.recommendedText) == [review],
+              "the original single-word shape still parses")
+        let fourth = ["prefix": "Use Codex and Vim ", "preferred": "today", "alternative": "Tuesday", "suffix": ""]
+        let crowded: [[String: String]] = [first, second, fourth, fourth]
+        check(DictationReview.parseAll(crowded, single: nil, transcript: sentence).isEmpty, "too many words is not a question")
+        check(several.allSatisfy { $0.term(in: $0.alternativeText) == $0.alternative }, "each word stays learnable on its own")
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("whispr-choice-checks-\(UUID())")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }

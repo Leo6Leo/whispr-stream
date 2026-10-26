@@ -128,4 +128,42 @@ final class TextInserterTests: XCTestCase {
     func testNoWebAccessibilitySwitchWhenNeitherIsSettable() {
         XCTAssertNil(TextInserter.webAccessibilityAttribute(manualSettable: false, enhancedSettable: false))
     }
+
+    private func privatePasteboard() -> NSPasteboard {
+        NSPasteboard(name: NSPasteboard.Name("WhisprStreamTests.\(UUID().uuidString)"))
+    }
+
+    func testInsertionWritesThePasteboardOnceAndKeepsWhatWasPasted() {
+        let pasteboard = privatePasteboard()
+        defer { pasteboard.releaseGlobally() }
+        pasteboard.clearContents()
+        pasteboard.setString("previous", forType: .string)
+        let before = pasteboard.changeCount
+        var pastes = 0
+        let delivered = expectation(description: "delivered")
+        TextInserter.deliver(
+            "Hello world", insertionText: " Hello world", insertAtCursor: true, copyToClipboard: true,
+            transport: .init(pasteboard: pasteboard, pressPaste: { _ in pastes += 1 })
+        ) { delivered.fulfill() }
+        wait(for: [delivered], timeout: 3)
+        XCTAssertEqual(pastes, 1)
+        XCTAssertEqual(pasteboard.changeCount - before, 1, "clipboard history must see one entry")
+        XCTAssertEqual(pasteboard.string(forType: .string), " Hello world")
+    }
+
+    func testInsertionRestoresThePreviousClipboardWhenRetentionIsOff() {
+        let pasteboard = privatePasteboard()
+        defer { pasteboard.releaseGlobally() }
+        pasteboard.clearContents()
+        pasteboard.setString("previous", forType: .string)
+        let before = pasteboard.changeCount
+        let delivered = expectation(description: "delivered")
+        TextInserter.deliver(
+            "Hello world", insertionText: "Hello world ", insertAtCursor: true, copyToClipboard: false,
+            transport: .init(pasteboard: pasteboard, pressPaste: { _ in })
+        ) { delivered.fulfill() }
+        wait(for: [delivered], timeout: 3)
+        XCTAssertEqual(pasteboard.changeCount - before, 2, "one write for the paste, one restore")
+        XCTAssertEqual(pasteboard.string(forType: .string), "previous")
+    }
 }

@@ -32,6 +32,48 @@ struct DictationReview: Codable, Equatable {
             && term.unicodeScalars.contains(where: CharacterSet.alphanumerics.contains)
     }
 
+    /// Most word choices one dictation may ask about; more reads as a rewrite.
+    static let maximumWords = 3
+
+    /// Every word choice for a transcript, in reading order.
+    ///
+    /// `reviews` (several words) wins over the original single `review`. Each
+    /// item must describe the same transcript and the words must not overlap;
+    /// one bad item rejects the set rather than asking a partial question.
+    static func parseAll(_ list: Any?, single: Any?, transcript: String) -> [Self] {
+        guard let items = list as? [Any], !items.isEmpty else {
+            return parse(single, transcript: transcript).map { [$0] } ?? []
+        }
+        let reviews = items.compactMap { parse($0, transcript: transcript) }
+            .sorted { $0.prefix.count < $1.prefix.count }
+        guard reviews.count == items.count, reviews.count <= maximumWords else { return [] }
+        for (earlier, later) in zip(reviews, reviews.dropFirst())
+        where !earlier.suffix.hasSuffix(later.preferred + later.suffix)
+            || earlier.suffix.count < later.preferred.count + later.suffix.count {
+            return []
+        }
+        return reviews
+    }
+
+    /// The transcript with each word set to its preferred term, or to its
+    /// alternative where `alternatives[i]` is true. `reviews` is in reading
+    /// order, as `parseAll` returns it.
+    static func compose(_ reviews: [Self], alternatives: [Bool]) -> String {
+        guard let first = reviews.first else { return "" }
+        var text = first.prefix
+        for (index, review) in reviews.enumerated() {
+            let useAlternative = alternatives.indices.contains(index) && alternatives[index]
+            text += useAlternative ? review.alternative : review.preferred
+            if index + 1 < reviews.count {
+                let next = reviews[index + 1]
+                text += String(review.suffix.dropLast(next.preferred.count + next.suffix.count))
+            } else {
+                text += review.suffix
+            }
+        }
+        return text
+    }
+
     func term(in text: String) -> String? {
         guard text.hasPrefix(prefix), text.hasSuffix(suffix),
               text.count >= prefix.count + suffix.count else { return nil }

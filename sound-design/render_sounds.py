@@ -347,6 +347,28 @@ PAIRS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# One-off interface sounds (not part of a start/finish pair)
+# ---------------------------------------------------------------------------
+
+def buildReviewConfirm(c, t0):
+    """The "Check a word" pick: the house click, then a quick upward blip.
+
+    Short enough to land with the card's 0.05 s press-in and finish before the
+    panel fades, bright enough to read as "done" rather than "start".
+    """
+    tick(c, start=t0, peak=0.15, freq=4200, dur=0.010, q=1.2)
+    tone(c, freq=700, start=t0, dur=0.025, type="sine", peak=0.07, attack=0.001)
+    pitchTone(c, f0=988, f1=1568, start=t0 + 0.012, dur=0.075, peak=0.15, attack=0.002)
+    twinkle(c, freq=N["E6"], start=t0 + 0.04, dur=0.07, peak=0.025)
+
+
+# slug -> (build, duration)
+SINGLES = {
+    "review-confirm": (buildReviewConfirm, 0.12),
+}
+
+
 def render(build, duration):
     c = Ctx(duration + TAIL)
     build(c, OFFSET)
@@ -377,19 +399,22 @@ def main() -> int:
 
     print(f"{'sound':<26}{'secs':>7}{'peak':>8}  clip")
     worst = 0.0
-    for key, (slug, (sb, sd), (fb, fd)) in PAIRS.items():
-        for half, build, dur in (("start", sb, sd), ("finish", fb, fd)):
+    jobs = [(f"{slug}-{half}", build, dur)
+            for slug, (sb, sd), (fb, fd) in PAIRS.values()
+            for half, build, dur in (("start", sb, sd), ("finish", fb, fd))]
+    jobs += [(slug, build, dur) for slug, (build, dur) in SINGLES.items()]
+    for name, build, dur in jobs:
             samples = render(build, dur)
             peak, clipped = write_wav(tmp, samples)
             worst = max(worst, peak)
-            caf = os.path.join(out, f"{slug}-{half}.caf")
+            caf = os.path.join(out, f"{name}.caf")
             subprocess.run(["afconvert", "-f", "caff", "-d", "LEI16", tmp, caf],
                            check=True, capture_output=True)
             flag = f" {clipped}" if clipped else ""
-            print(f"{slug + '-' + half:<26}{len(samples)/SAMPLE_RATE:>7.2f}{peak:>8.3f}{flag}")
+            print(f"{name:<26}{len(samples)/SAMPLE_RATE:>7.2f}{peak:>8.3f}{flag}")
 
     os.remove(tmp)
-    print(f"\n{len(PAIRS) * 2} files -> {out}")
+    print(f"\n{len(jobs)} files -> {out}")
     print(f"loudest peak {worst:.3f} (1.0 would clip)")
     return 0
 

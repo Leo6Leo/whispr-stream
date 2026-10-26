@@ -158,15 +158,25 @@ enum TextInserter {
         }
     }
 
-    /// Performs the requested output actions. `text` is the clean transcript
-    /// retained on the clipboard; `insertionText` may include cursor-separating
-    /// whitespace used only for the synthetic paste.
+    /// The pasteboard and the paste keystroke, replaceable in tests.
+    struct Transport {
+        var pasteboard: NSPasteboard = .general
+        var pressPaste: (pid_t?) -> Void = { pressCommandV(targetProcessID: $0) }
+        static let live = Transport()
+    }
+
+    /// Performs the requested output actions. `insertionText` is what gets
+    /// pasted: the transcript plus whatever separator the cursor context asks
+    /// for. The pasteboard is written exactly once per delivery, so clipboard
+    /// history shows one entry, and with retention on that entry is the pasted
+    /// text itself.
     static func deliver(
         _ text: String,
         insertionText: String? = nil,
         insertAtCursor: Bool,
         copyToClipboard: Bool,
         targetProcessID: pid_t? = nil,
+        transport: Transport = .live,
         completion: (() -> Void)? = nil
     ) {
         guard !text.isEmpty else { completion?(); return }
@@ -174,12 +184,13 @@ enum TextInserter {
         if insertAtCursor {
             insert(
                 insertionText ?? text,
-                clipboardAfterPaste: copyToClipboard ? text : nil,
+                retainOnClipboard: copyToClipboard,
                 targetProcessID: targetProcessID,
+                transport: transport,
                 completion: completion
             )
         } else if copyToClipboard {
-            copyOnly(text)
+            copyOnly(text, pasteboard: transport.pasteboard)
             completion?()
         } else {
             Log.write("transcript delivered nowhere (both output options off)")
@@ -189,58 +200,49 @@ enum TextInserter {
 
     private static func insert(
         _ text: String,
-        clipboardAfterPaste: String?,
+        retainOnClipboard: Bool,
         targetProcessID: pid_t?,
+        transport: Transport,
         completion: (() -> Void)?
     ) {
         guard !text.isEmpty else { completion?(); return }
+        let pb = transport.pasteboard
 
         let front = NSWorkspace.shared.frontmostApplication
         Log.write("insert: \(text.count) chars -> front=\(front?.bundleIdentifier ?? "nil") "
                   + "(\(front?.localizedName ?? "?")) trusted=\(AXIsProcessTrusted())")
 
-        let pb = NSPasteboard.general
-        let saved = clipboardAfterPaste == nil ? PasteboardSnapshot(pb) : nil
-
+        // One write per dictation. Rewriting a separator-free copy after the
+        // paste used to leave two near-identical entries in clipboard history.
+        let saved = retainOnClipboard ? nil : PasteboardSnapshot(pb)
         pb.clearContents()
         let ok = pb.setString(text, forType: .string)
-        Log.write("  pasteboard write=\(ok) chars=\(text.count)")
+        Log.write("  pasteboard write=\(ok) chars=\(text.count) retained=\(retainOnClipboard)")
         let insertedChangeCount = pb.changeCount
 
         // The pasteboard write is asynchronous from the front app's point of
         // view; posting Cmd-V in the same runloop tick often pastes stale
         // contents or nothing at all.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            pressCommandV(targetProcessID: targetProcessID)
-
-            if saved != nil || clipboardAfterPaste != text {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                    defer { completion?() }
-                    // Do not overwrite a clipboard update made by the user or
-                    // the destination app while the paste was in flight.
-                    guard pb.changeCount == insertedChangeCount else {
-                        Log.write("  skipped clipboard restore: clipboard changed")
-                        return
-                    }
-                    if let saved {
-                        saved.restore(to: pb)
-                        Log.write("  restored previous clipboard contents")
-                    } else if let clipboardAfterPaste {
-                        pb.clearContents()
-                        pb.setString(clipboardAfterPaste, forType: .string)
-                        Log.write("  retained clean transcript on clipboard")
-                    }
+            transport.pressPaste(targetProcessID)
+            guard let saved else { completion?(); return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                defer { completion?() }
+                // Do not overwrite a clipboard update made by the user or
+                // the destination app while the paste was in flight.
+                guard pb.changeCount == insertedChangeCount else {
+                    Log.write("  skipped clipboard restore: clipboard changed")
+                    return
                 }
-            } else {
-                completion?()
+                saved.restore(to: pb)
+                Log.write("  restored previous clipboard contents")
             }
         }
     }
 
     /// Put the transcript on the clipboard without pasting it.
-    static func copyOnly(_ text: String) {
+    static func copyOnly(_ text: String, pasteboard pb: NSPasteboard = .general) {
         guard !text.isEmpty else { return }
-        let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
         Log.write("copied \(text.count) chars (insert at cursor off)")

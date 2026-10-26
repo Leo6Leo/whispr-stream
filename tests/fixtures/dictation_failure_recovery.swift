@@ -89,7 +89,7 @@ final class Settings {
 }
 enum TranscriptFormatter {
     static func adjustedForCursor(_ text: String, precedingText: String?) -> String { text }
-    static func textForInsertion(_ text: String) -> String { text + " " }
+    static func textForInsertion(_ text: String, precedingText: String? = nil) -> String { text + " " }
 }
 enum ShortUtteranceLanguageResolver {
     static func modelLanguage(for value: String) -> String? { nil }

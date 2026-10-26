@@ -226,6 +226,14 @@ struct HUDView: View {
             // edge in rather than snapping the leftmost glyphs away.
             .animation(.easeInOut(duration: 0.2), value: transcriptOverflows)
         }
+        // The final transcript replaces the preview in one step, often with
+        // earlier words the 12 s preview window never showed. Springing that
+        // width change draws the longer line from the old leading edge, so
+        // the sentence rolled back toward its start just before the HUD
+        // closed. Swap it in place; the capsule still springs around it.
+        .transaction { transaction in
+            if state.phase == .inserted { transaction.animation = nil }
+        }
     }
 
     private static let transcriptMaxWidth: CGFloat = 540

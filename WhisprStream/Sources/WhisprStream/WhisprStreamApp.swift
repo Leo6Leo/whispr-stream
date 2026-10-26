@@ -6,7 +6,7 @@ import SwiftUI
 struct DeferredTranscriptDelivery: Equatable {
     let text: String
     let adjustForCursor: Bool
-    var review: DictationReview? = nil
+    var reviews: [DictationReview] = []
 }
 
 struct TranscriptDeliveryGate {
@@ -822,7 +822,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             state.committed = committed
             state.tail = tail
 
-        case let .final(text, secs, ms, review):
+        case let .final(text, secs, ms, reviews):
             guard state.phase == .thinking, reviewPanel == nil else { return }
             precedingTextAtDictationStart = nil
             captureUtterance(rawTranscript: text)
@@ -833,7 +833,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 dismissNow()
                 return
             }
-            let delivery = prepareDelivery(text, review: review)
+            let delivery = prepareDelivery(text, reviews: reviews)
             if let ready = transcriptDeliveryGate.submit(
                 delivery,
                 whileContextIsResolving: isResolvingPrecedingText
@@ -908,8 +908,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func captureDictationCursorSnapshot() {
         needsCursorSnapshotAfterDelivery = false
         reviewTarget = settings.reviewUncertainWords ? TextInserter.captureReviewTarget() : nil
+        // The text before the cursor decides the separator of every paste.
+        // Sentence capitalization wants it too and alone pays for the keyboard
+        // fallback when this Accessibility read comes back empty.
         precedingTextAtDictationStart = settings.autoInsert
-            && settings.contextAwareCapitalization
             ? TextInserter.textBeforeCursor()
             : nil
         resolvedPrecedingText = precedingTextAtDictationStart
@@ -961,10 +963,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func deliverTranscript(_ delivery: DeferredTranscriptDelivery) {
-        let precedingText = delivery.adjustForCursor ? resolvedPrecedingText : nil
+        let precedingText = resolvedPrecedingText
         cancelCursorContextResolution()
-        if settings.reviewUncertainWords, let review = delivery.review {
-            presentReview(review, precedingText: precedingText)
+        if settings.reviewUncertainWords, !delivery.reviews.isEmpty {
+            presentReview(delivery.reviews, precedingText: precedingText)
             return
         }
         deliverFinalTranscript(
@@ -980,7 +982,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func refreshLearnedContext() { asr?.setLearnedContext(learnedContext) }
 
-    private func prepareDelivery(_ text: String, review: DictationReview? = nil) -> DeferredTranscriptDelivery {
+    private func prepareDelivery(_ text: String, reviews: [DictationReview] = []) -> DeferredTranscriptDelivery {
         let fluent = settings.removeFillerWords ? FillerWordNormalizer.normalize(text) : text
         let normalized = SpokenSymbolNormalizer.normalize(
             SpelledLetterNormalizer.normalize(SpokenNumberNormalizer.normalize(fluent))
@@ -992,18 +994,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             text: expansion.text,
             adjustForCursor: settings.autoInsert && settings.contextAwareCapitalization
                 && expansion.matchedShortcutID == nil,
-            review: expansion.matchedShortcutID == nil ? review : nil
+            reviews: expansion.matchedShortcutID == nil ? reviews : []
         )
     }
 
-    private func presentReview(_ review: DictationReview, precedingText: String?) {
+    private func presentReview(_ reviews: [DictationReview], precedingText: String?) {
         dismissWork?.cancel()
         panel.dismiss()
         let target = reviewTarget
         let savesChoices = settings.learnFromCorrections
         let model = settings.model.rawValue
         let generation = speechEngineGeneration
-        reviewPanel = DictationReviewPanel(review: review, savesChoices: savesChoices) { [weak self] text, manual in
+        reviewPanel = DictationReviewPanel(reviews: reviews, savesChoices: savesChoices,
+                                           playsSound: settings.playSound) { [weak self] text, manual, alternatives in
             guard let self, self.speechEngineGeneration == generation else { return }
             self.reviewPanel = nil
             self.reviewTarget = nil
@@ -1014,13 +1017,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             if savesChoices && self.settings.learnFromCorrections {
-                CorrectionStore.shared.record(review, chosenText: text, model: model, manual: manual)
+                if manual, let first = reviews.first {
+                    // One rewritten sentence is one piece of feedback.
+                    CorrectionStore.shared.record(first, chosenText: text, model: model, manual: true)
+                } else {
+                    // Each word is learned on its own, exactly as a single-word
+                    // review would record it.
+                    for (review, alternative) in zip(reviews, alternatives) {
+                        CorrectionStore.shared.record(
+                            review,
+                            chosenText: alternative ? review.alternativeText : review.recommendedText,
+                            model: model, manual: false
+                        )
+                    }
+                }
             }
             let chosen = self.prepareDelivery(text)
             guard self.settings.autoInsert else {
                 target?.application.activate(options: [])
                 self.panel.present()
-                self.deliverFinalTranscript(chosen.text, precedingText: nil, adjustForCursor: false)
+                // The panel already played its confirm sound.
+                self.deliverFinalTranscript(chosen.text, precedingText: nil, adjustForCursor: false,
+                                            playsFeedback: false)
                 return
             }
             TextInserter.restoreReviewTarget(target, isCurrent: { [weak self] in
@@ -1030,7 +1048,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.panel.present()
                 self.deliverFinalTranscript(chosen.text, precedingText: precedingText,
                                             adjustForCursor: chosen.adjustForCursor && processID != nil,
-                                            targetProcessID: processID, forceClipboard: processID == nil)
+                                            targetProcessID: processID, forceClipboard: processID == nil,
+                                            playsFeedback: false)
             }
         }
         reviewPanel?.show()
@@ -1053,7 +1072,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         precedingText: String?,
         adjustForCursor: Bool,
         targetProcessID: pid_t? = nil,
-        forceClipboard: Bool = false
+        forceClipboard: Bool = false,
+        playsFeedback: Bool = true
     ) {
         let deliveredText = adjustForCursor
             ? TranscriptFormatter.adjustedForCursor(text, precedingText: precedingText)
@@ -1062,7 +1082,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             dismissNow()
             return
         }
-        let insertionText = TranscriptFormatter.textForInsertion(deliveredText)
+        let insertionText = TranscriptFormatter.textForInsertion(deliveredText, precedingText: precedingText)
         state.committed = deliveredText
         state.tail = ""
         state.phase = forceClipboard ? .failed("Copied — return to your original field to paste") : .inserted
@@ -1089,7 +1109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.scheduleAutomaticUpdatePrompt()
             }
         )
-        settings.playFeedback()
+        if playsFeedback { settings.playFeedback() }
         scheduleDismiss(after: forceClipboard ? 3 : 0.42)
     }
 
