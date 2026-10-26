@@ -20,19 +20,29 @@ def voice(seconds):
     return 0.04 * np.sin(2 * np.pi * 180 * samples / asr_server.SAMPLE_RATE)
 
 
+def silence(seconds):
+    return np.zeros(int(seconds * asr_server.SAMPLE_RATE), dtype=np.float32)
+
+
+def samples(seconds):
+    return int(seconds * asr_server.SAMPLE_RATE)
+
+
 class FinalizationTests(unittest.TestCase):
     def make_server(self, outputs, *, seconds=5.0, context="", language=None):
         calls = []
+        lengths = []
         responses = iter(outputs)
 
         def transcribe(audio, **kwargs):
             calls.append(kwargs)
+            lengths.append(len(audio))
             response = next(responses)
             if isinstance(response, Exception):
                 raise response
             return SimpleNamespace(text=response, language=language or "Chinese")
 
-        session = SimpleNamespace(transcribe=transcribe, calls=calls)
+        session = SimpleNamespace(transcribe=transcribe, calls=calls, lengths=lengths)
         with patch.object(asr_engine, "build_session", return_value=(session, 0)), \
              patch.object(asr_server, "emit"):
             server = asr_server.Server("test", 8, context)
@@ -100,11 +110,14 @@ class FinalizationTests(unittest.TestCase):
         self.assertEqual(review["prefix"] + review["preferred"] + review["suffix"], final["text"])
         self.assertEqual(review["prefix"] + review["alternative"] + review["suffix"], "Use Codex.")
         self.assertEqual(review["preferred"], "Codec")
+        self.assertEqual(final["reviews"], [review])
 
     def test_resolved_flip_does_not_ask_user_to_choose(self):
         server = self.make_server(["Use Codex."] * 2 + ["Use Codec.", "Use Codex."])
         self.preview(server, [voice(0.2)] * 3)
-        self.assertNotIn("review", self.final(server))
+        final = self.final(server)
+        self.assertNotIn("review", final)
+        self.assertNotIn("reviews", final)
 
     def test_learned_terms_are_hints_without_forced_spelling_replacement(self):
         server = self.make_server(["Use Codec."])
@@ -156,6 +169,14 @@ class FinalizationTests(unittest.TestCase):
                     final = self.final(server)
                     self.assertEqual(final["text"], latest)
                     self.assertNotIn("review", final)
+                    if old == "Use Codex and Vim":
+                        # Two word swaps are a stepped choice, not a rewrite.
+                        self.assertEqual(
+                            [(r["preferred"], r["alternative"]) for r in final["reviews"]],
+                            [("Codec", "Codex"), ("Emacs", "Vim")],
+                        )
+                    else:
+                        self.assertNotIn("reviews", final)
                     self.assertEqual(final["mode"], "reuse-exact" if cached else "fresh-final")
                     self.assertEqual(len(server.session.calls), 3)
 
@@ -361,3 +382,252 @@ class FinalizationTests(unittest.TestCase):
         self.assertEqual(final["text"], "Testing LoRA")
         self.assertEqual(final["mode"], "reuse-exact")
         self.assertEqual(len(server.session.calls), 2)
+
+    def test_thinking_pause_is_compressed_only_for_the_final_decode(self):
+        # Previews decode the real timeline and already show the spurious 。;
+        # the final pass must decode the shrunken pause and not reuse them.
+        with_period = "所以我要。多花几秒钟时间"
+        server = self.make_server(
+            ["所以我要", "所以我要。", with_period, "所以我要多花几秒钟时间"]
+        )
+        self.preview(server, [silence(3.0), voice(2.0)])
+        final = self.final(server)
+        self.assertEqual(final["text"], "所以我要多花几秒钟时间")
+        self.assertEqual(final["mode"], "fresh-final-pause-compressed")
+        self.assertEqual(final["secs"], 10.0)
+        self.assertEqual(
+            server.session.lengths,
+            [samples(5.0), samples(8.0), samples(10.0), samples(7.5)],
+        )
+
+    def test_stable_preview_spanning_a_pause_is_not_reused_at_stop(self):
+        with_period = "所以我要。多花几秒钟时间"
+        server = self.make_server([with_period] * 3 + ["所以我要多花几秒钟时间"])
+        server.buf = np.concatenate((voice(2.0), silence(2.0), voice(2.0)))
+        self.preview(server, [voice(0.2)] * 2)
+        final = self.final(server)
+        self.assertEqual(final["text"], "所以我要多花几秒钟时间")
+        self.assertEqual(final["mode"], "fresh-final-pause-compressed")
+        self.assertEqual(server.session.lengths[-1], samples(6.4 - 2.0 + 0.5))
+
+    def test_short_internal_pause_keeps_exact_preview_reuse(self):
+        original = "先打开设置"
+        server = self.make_server([original, original, "unexpected"])
+        self.preview(server, [np.concatenate((silence(1.0), voice(0.5)))])
+        final = self.final(server)
+        self.assertEqual(final["text"], original)
+        self.assertEqual(final["mode"], "reuse-exact")
+        self.assertEqual(len(server.session.calls), 2)
+
+    def test_long_trailing_silence_is_not_compressed_and_preview_is_reused(self):
+        original = "我用Codex写代码。"
+        server = self.make_server([original, original, "unexpected"])
+        events = self.preview(server, [voice(0.2), silence(1.8)])
+        self.assertEqual(events[-1]["committed"] + events[-1]["tail"], original)
+        final = self.final(server)
+        self.assertEqual(final["text"], original)
+        self.assertEqual(final["mode"], "reuse-silent-tail")
+        self.assertEqual(len(server.session.calls), 2)
+
+    def test_short_clip_language_follows_spoken_length_not_compressed_length(self):
+        # 0.3 s + 1.6 s pause + 0.3 s is 2.2 s spoken: automatic detection.
+        # Compressed it is 1.1 s, which must not re-enable the short-clip hint.
+        server = self.make_server(["打开 settings"], seconds=0.0)
+        server._utterance_short_language = "Chinese"
+        server.buf = np.concatenate((voice(0.3), silence(1.6), voice(0.3)))
+        final = self.final(server)
+        self.assertEqual(final["mode"], "fresh-final-pause-compressed")
+        self.assertEqual(server.session.calls, [{}])
+        self.assertEqual(server.session.lengths, [samples(1.1)])
+
+
+    def test_long_trailing_silence_is_trimmed_for_the_fresh_final_decode(self):
+        # Twelve idle seconds after two words are far past the 2 s reuse tail,
+        # so this is a fresh decode; it must see half a second of that idle.
+        server = self.make_server(["Okay, so."], seconds=0.0)
+        server.buf = np.concatenate((voice(2.0), silence(12.0)))
+        final = self.final(server)
+        self.assertEqual(final["text"], "Okay, so.")
+        self.assertEqual(final["mode"], "fresh-final-edge-trimmed")
+        self.assertEqual(final["secs"], 14.0)
+        self.assertEqual(server.session.lengths, [samples(2.5)])
+
+    def test_long_leading_silence_is_trimmed_and_blocks_preview_reuse(self):
+        # Every preview saw the six quiet seconds before the speech and may
+        # carry invented words ahead of it, so a stable preview is not reused.
+        original = "测试一下"
+        server = self.make_server([original] * 3 + [original], seconds=0.0)
+        server.buf = np.concatenate((silence(6.0), voice(1.0)))
+        self.preview(server, [voice(0.2)] * 2)
+        final = self.final(server)
+        self.assertEqual(final["text"], original)
+        self.assertEqual(final["mode"], "fresh-final-edge-trimmed")
+        self.assertEqual(final["secs"], 7.4)
+        self.assertEqual(server.session.lengths[-1], samples(0.5 + 1.4))
+
+    def test_pause_compression_and_edge_trimming_combine(self):
+        server = self.make_server(["好的"], seconds=0.0)
+        server.buf = np.concatenate(
+            (silence(3.0), voice(1.0), silence(3.0), voice(1.0), silence(4.0))
+        )
+        final = self.final(server)
+        self.assertEqual(final["mode"], "fresh-final-pause-compressed-edge-trimmed")
+        self.assertEqual(final["secs"], 12.0)
+        self.assertEqual(server.session.lengths, [samples(0.5 + 1.0 + 0.5 + 1.0 + 0.5)])
+
+
+class PauseCompressionTests(unittest.TestCase):
+    def test_only_internal_long_pauses_shrink(self):
+        lead, a, pause, b, tail = silence(2.0), voice(1.0), silence(3.0), voice(1.0), silence(2.5)
+        audio = np.concatenate((lead, a, pause, b, tail))
+        out = asr_server.compress_internal_pauses(audio)
+        self.assertEqual(len(out), len(audio) - samples(2.5))
+        head = len(lead) + len(a) + samples(0.25)
+        np.testing.assert_array_equal(out[:head], audio[:head])
+        tail_len = len(tail) + len(b) + samples(0.25)
+        np.testing.assert_array_equal(out[-tail_len:], audio[-tail_len:])
+
+    def test_every_long_pause_shrinks_and_short_ones_stay(self):
+        audio = np.concatenate(
+            (voice(1.0), silence(1.4), voice(1.0), silence(5.0), voice(0.5), silence(1.6), voice(0.5))
+        )
+        out = asr_server.compress_internal_pauses(audio)
+        self.assertEqual(len(out), len(audio) - samples(4.5) - samples(1.1))
+
+    def test_unchanged_audio_is_returned_as_the_same_object(self):
+        for audio in (
+            np.concatenate((voice(1.0), silence(1.4), voice(1.0))),
+            silence(6.0),
+            voice(3.0),
+            np.zeros(0, dtype=np.float32),
+        ):
+            self.assertIs(asr_server.compress_internal_pauses(audio), audio)
+
+    def test_room_tone_pause_counts_as_quiet(self):
+        rng = np.random.default_rng(1)
+        tone = (rng.standard_normal(samples(3.0)) * 0.004).astype(np.float32)
+        audio = np.concatenate((voice(1.0), tone, voice(1.0)))
+        self.assertEqual(len(asr_server.compress_internal_pauses(audio)), samples(2.5))
+
+    def test_quiet_speech_inside_a_gap_is_preserved(self):
+        # RMS ~0.017 is speech-level for has_speech; it must break the run.
+        murmur = voice(0.4) * 0.6
+        audio = np.concatenate((voice(1.0), silence(1.0), murmur, silence(1.0), voice(1.0)))
+        self.assertIs(asr_server.compress_internal_pauses(audio), audio)
+
+
+class EdgeTrimTests(unittest.TestCase):
+    def test_only_long_edges_shrink_and_keep_their_half_second(self):
+        lead, speech, tail = silence(3.0), voice(1.0), silence(2.5)
+        audio = np.concatenate((lead, speech, tail))
+        out, lead_trimmed, tail_trimmed = asr_server.trim_edge_silence(audio)
+        self.assertTrue(lead_trimmed and tail_trimmed)
+        self.assertEqual(len(out), samples(0.5 + 1.0 + 0.5))
+        np.testing.assert_array_equal(out[samples(0.5):samples(1.5)], speech)
+
+    def test_short_edges_are_left_alone(self):
+        audio = np.concatenate((silence(1.4), voice(1.0), silence(1.5)))
+        out, lead_trimmed, tail_trimmed = asr_server.trim_edge_silence(audio)
+        self.assertIs(out, audio)
+        self.assertFalse(lead_trimmed or tail_trimmed)
+
+    def test_internal_pauses_are_not_touched_by_edge_trimming(self):
+        audio = np.concatenate((voice(1.0), silence(5.0), voice(1.0)))
+        self.assertIs(asr_server.trim_edge_silence(audio)[0], audio)
+
+    def test_quiet_only_audio_is_returned_unchanged(self):
+        for audio in (silence(6.0), np.zeros(0, dtype=np.float32)):
+            self.assertIs(asr_server.trim_edge_silence(audio)[0], audio)
+
+
+class FirstPreviewTests(FinalizationTests):
+    """The first preview of an utterance waits for real speech, and an empty
+    preview re-arms on the next microphone chunk instead of MIN_NEW_AUDIO."""
+
+    def make_utterance(self, outputs, audio):
+        server = self.make_server(outputs)
+        server.buf = audio
+        server._first_preview_pending = True
+        server._speech_gate_misses = 0
+        server._utterance_started = asr_server.time.perf_counter()
+        return server
+
+    def run_loop(self, server, *, on_cooldown=(), on_sleep=()):
+        """Drive the real loop. Cooldowns and poll sleeps each append audio;
+        once a list is exhausted its next call ends the loop."""
+        cooldowns = iter(on_cooldown)
+        sleeps = iter(on_sleep)
+
+        class AdvanceAudio:
+            def wait(self, timeout):
+                addition = next(cooldowns, None)
+                if addition is None:
+                    return True
+                server.buf = np.concatenate((server.buf, addition))
+                return False
+
+            def set(self):
+                pass
+
+        def fake_sleep(_seconds):
+            addition = next(sleeps, None)
+            if addition is None:
+                server.active = False
+                return
+            server.buf = np.concatenate((server.buf, addition))
+
+        server._preview_stop = AdvanceAudio()
+        with patch.object(asr_server, "emit") as emitted, \
+             patch.object(asr_server.time, "sleep", new=fake_sleep):
+            server._loop()
+        return [call.args[0] for call in emitted.call_args_list]
+
+    def test_first_preview_waits_for_200ms_of_speech(self):
+        # 0.4 s of audio with 100 ms of speech passes the final-decode gate
+        # but is not enough for a first preview; one more 100 ms chunk is.
+        opening = np.concatenate((silence(0.3), voice(0.1)))
+        self.assertTrue(asr_server.has_speech(opening))
+        server = self.make_utterance(["Hello"], opening)
+        events = self.run_loop(server, on_sleep=[voice(0.1)])
+        self.assertEqual(server.session.lengths, [samples(0.5)])
+        self.assertEqual(server._speech_gate_misses, 1)
+        self.assertEqual(events[-1]["committed"] + events[-1]["tail"], "Hello")
+
+    def test_later_previews_keep_the_normal_cadence(self):
+        server = self.make_utterance(["Hello", "Hello there"], voice(0.5))
+        events = self.run_loop(server, on_cooldown=[voice(0.2)])
+        self.assertFalse(server._first_preview_pending)
+        self.assertEqual(server.session.lengths, [samples(0.5), samples(0.7)])
+        self.assertEqual(events[-1]["committed"] + events[-1]["tail"], "Hello there")
+
+    def test_empty_preview_rearms_on_the_next_microphone_chunk(self):
+        server = self.make_utterance(["", "Hello"], voice(0.5))
+        events = self.run_loop(server, on_cooldown=[voice(0.04)])
+        self.assertEqual(server.session.lengths, [samples(0.5), samples(0.54)])
+        self.assertEqual(events[-1]["committed"] + events[-1]["tail"], "Hello")
+
+    def test_utterance_start_prerolls_the_model_before_audio_arrives(self):
+        # The fake decoder answers the silent pre-roll first, then the speech.
+        server = self.make_utterance(["", "Hello"], silence(0))
+        chunks = [voice(0.1)] * 5
+        events = self.run_loop(server, on_sleep=chunks)
+        # One silent pre-roll decode, no partial for it, then the real decode
+        # once 0.3 s of audio holds 200 ms of speech.
+        self.assertEqual(server.session.lengths[0], samples(asr_server.PREROLL_SEC))
+        self.assertEqual(server.session.lengths[1:], [samples(0.3)])
+        self.assertGreaterEqual(server._preroll_ms, 0)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["committed"] + events[0]["tail"], "Hello")
+
+    def test_no_preroll_when_audio_is_already_waiting(self):
+        server = self.make_utterance(["Hello"], voice(0.5))
+        self.run_loop(server)
+        self.assertEqual(server.session.lengths, [samples(0.5)])
+
+    def test_non_empty_preview_still_waits_for_min_new_audio(self):
+        server = self.make_utterance(["Hi", "Hi there"], voice(0.5))
+        events = self.run_loop(server, on_cooldown=[voice(0.04)], on_sleep=[voice(0.04)] * 2)
+        # 40 ms chunks accumulate to 120 ms < MIN_NEW_AUDIO; the loop polls
+        # without decoding until the harness ends it.
+        self.assertEqual(server.session.lengths, [samples(0.5)])
+        self.assertEqual(events[-1]["committed"] + events[-1]["tail"], "Hi")
