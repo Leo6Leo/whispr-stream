@@ -1168,12 +1168,17 @@ class Server:
         result: DecodeResult,
         preview_context: str | None = None,
         force_automatic_language: bool = False,
+        language_audio: np.ndarray | None = None,
     ) -> tuple[DecodeResult, str | None]:
         """Verify generated context words against an unprompted decode.
 
         A nearby spelling such as ``Cloud`` still supports ``Claude``. When an
         embedded prompted word disagrees, only that aligned word is replaced;
         the prompted sentence and punctuation stay intact.
+
+        ``language_audio`` is the uncompressed buffer when ``audio`` had its
+        pauses or edge silence shrunk, so the short-clip language choice
+        matches the prompted decode it is checking.
         """
         if not transcript_contains_context_word(result.text, context):
             canonical = canonicalize_context_variants(result.text, context)
@@ -1200,7 +1205,9 @@ class Server:
             unbiased = self._decode_result(
                 audio,
                 "",
-                None if force_automatic_language else self._language_for_audio(audio),
+                None if force_automatic_language else self._language_for_audio(
+                    audio if language_audio is None else language_audio
+                ),
                 use_learned_context=False,
             )
         except Exception as error:
@@ -1698,6 +1705,7 @@ class Server:
                 context,
                 result,
                 preview_context,
+                language_audio=audio,
             )
             review = None
             if (

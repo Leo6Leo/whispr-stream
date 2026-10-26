@@ -219,4 +219,21 @@ final class CorrectionCaptureTests: XCTestCase {
         XCTAssertTrue(CorrectionDiff.caretLeftSpan(caret: 32, span: span))
         XCTAssertTrue(CorrectionDiff.caretLeftSpan(caret: 9, span: span))
     }
+
+    func testAccessibilityCaretIsConvertedFromUTF16() {
+        // Two emoji are four UTF-16 units but two Characters.
+        let field = "👍👍 nice. Hello world"
+        let span = 9..<20
+        XCTAssertEqual(String(Array(field)[span]), "Hello world")
+        let caret = CorrectionDiff.characterOffset(utf16: field.utf16.count, in: field)
+        XCTAssertEqual(caret, 20)
+        XCTAssertFalse(CorrectionDiff.caretLeftSpan(caret: caret!, span: span))
+
+        // CRLF is one Character and two units.
+        let lines = "one\r\ntwo\r\nHello"
+        XCTAssertEqual(CorrectionDiff.characterOffset(utf16: lines.utf16.count, in: lines), Array(lines).count)
+        // A position inside a surrogate pair resolves to that character's start.
+        XCTAssertEqual(CorrectionDiff.characterOffset(utf16: 1, in: "👍a"), 0)
+        XCTAssertNil(CorrectionDiff.characterOffset(utf16: 99, in: "abc"))
+    }
 }

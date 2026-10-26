@@ -440,6 +440,18 @@ class FinalizationTests(unittest.TestCase):
         self.assertEqual(server.session.calls, [{}])
         self.assertEqual(server.session.lengths, [samples(1.1)])
 
+    def test_vocabulary_check_uses_the_spoken_length_for_its_language(self):
+        # 1.8 s idle + 0.5 s + 0.3 s is 2.6 s spoken; trimmed it is 1.3 s.
+        # The unbiased check must run in the same automatic mode as the
+        # prompted decode it verifies, not the short-clip language.
+        server = self.make_server(["用 Codex", "用 Codex"], seconds=0.0, context="Codex")
+        server._utterance_short_language = "Chinese"
+        server.buf = np.concatenate((silence(1.8), voice(0.5), silence(0.3)))
+        final = self.final(server)
+        self.assertEqual(final["text"], "用 Codex")
+        self.assertEqual(server.session.calls, [{"context": "Codex"}, {}])
+        self.assertEqual(server.session.lengths, [samples(1.3), samples(1.3)])
+
 
     def test_long_trailing_silence_is_trimmed_for_the_fresh_final_decode(self):
         # Twelve idle seconds after two words are far past the 2 s reuse tail,

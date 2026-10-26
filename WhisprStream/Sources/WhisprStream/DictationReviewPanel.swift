@@ -318,8 +318,9 @@ struct DictationReviewView: View {
             VStack(spacing: 8) { choiceButtons }
         }
         .background {
-            // Return keeps the best guess, like a default button.
-            Button("") { choose(.preferred) }
+            // Return keeps what is shown, like a default button: the best
+            // guess, or this word's earlier answer when the user stepped back.
+            Button("") { choose(pick(at: step) ?? .preferred) }
                 .keyboardShortcut(.defaultAction)
                 .opacity(0)
                 .accessibilityHidden(true)

@@ -49,6 +49,23 @@ enum CorrectionDiff {
         return candidates.last(where: { $0.upperBound <= caretIndex }) ?? candidates.last
     }
 
+    /// Converts an Accessibility position, which counts UTF-16 units, to the
+    /// Character offset every span here uses. Emoji, CRLF and combining marks
+    /// before the caret make the two differ. Nil when the position is outside
+    /// `text`; one inside a character resolves to that character's start.
+    static func characterOffset(utf16 position: Int, in text: String) -> Int? {
+        guard position >= 0, position <= text.utf16.count else { return nil }
+        var units = 0
+        var characters = 0
+        for character in text {
+            let next = units + character.utf16.count
+            if next > position { break }
+            units = next
+            characters += 1
+        }
+        return characters
+    }
+
     /// Returns the correction when what now stands where the transcript was
     /// pasted differs from it by a word fix. Everything outside the span may
     /// have changed in the meantime.
@@ -131,11 +148,12 @@ enum CorrectionDiff {
         // Rank the current lines by what they share with the span's line at
         // either end, align the best few, and keep the closest in edit
         // distance. Ties go to the line nearest the original position.
+        // Each line is scored once, in place: this runs on every caret move,
+        // and a long note has thousands of lines.
         let candidates = lineRanges(of: now)
+        let scores = candidates.map { sharedEdges(line[...], now[$0]) }
         let ranked = candidates.indices.sorted { lhs, rhs in
-            let left = sharedEdges(line, Array(now[candidates[lhs]]))
-            let right = sharedEdges(line, Array(now[candidates[rhs]]))
-            if left != right { return left > right }
+            if scores[lhs] != scores[rhs] { return scores[lhs] > scores[rhs] }
             return abs(lhs - lineIndex) < abs(rhs - lineIndex)
         }
         var best: (range: Range<Int>, alignment: Alignment)?
@@ -279,12 +297,10 @@ enum CorrectionDiff {
         return ranges
     }
 
-    private static func sharedEdges(_ a: [Character], _ b: [Character]) -> Int {
-        var prefix = 0
-        while prefix < a.count, prefix < b.count, a[prefix] == b[prefix] { prefix += 1 }
-        var suffix = 0
-        while suffix < a.count - prefix, suffix < b.count - prefix,
-              a[a.count - 1 - suffix] == b[b.count - 1 - suffix] { suffix += 1 }
+    private static func sharedEdges(_ a: ArraySlice<Character>, _ b: ArraySlice<Character>) -> Int {
+        let prefix = zip(a, b).prefix(while: { $0 == $1 }).count
+        let suffix = zip(a.dropFirst(prefix).reversed(), b.dropFirst(prefix).reversed())
+            .prefix(while: { $0 == $1 }).count
         return prefix + suffix
     }
 
@@ -420,7 +436,7 @@ final class CorrectionCaptureSession {
             element = TextInserter.focusedTextElement()
         }
         if let value = readValue(),
-           let range = CorrectionDiff.insertedRange(of: insertedText, in: value, caret: readCaret()) {
+           let range = CorrectionDiff.insertedRange(of: insertedText, in: value, caret: readCaret(in: value)) {
             baseline = value
             insertedRange = range
             insertedOffsets = value.distance(from: value.startIndex, to: range.lowerBound)
@@ -523,7 +539,7 @@ final class CorrectionCaptureSession {
     private func noteCaretPosition() {
         guard let baseline, let insertedOffsets else { return }
         func caretIsOutside() -> Bool {
-            guard let caret = readCaret(), let value = readValue(),
+            guard let value = readValue(), let caret = readCaret(in: value),
                   let span = CorrectionDiff.currentSpan(
                     baseline: Array(baseline), span: insertedOffsets, current: Array(value)
                   ) else { return false }
@@ -558,13 +574,15 @@ final class CorrectionCaptureSession {
         return value as? String
     }
 
-    private func readCaret() -> Int? {
+    /// The caret as a Character offset into `text`, the field value it was
+    /// read alongside.
+    private func readCaret(in text: String) -> Int? {
         guard let element else { return nil }
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &value) == .success,
               let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
         var range = CFRange()
         guard AXValueGetValue(value as! AXValue, .cfRange, &range) else { return nil }
-        return range.location + range.length
+        return CorrectionDiff.characterOffset(utf16: range.location + range.length, in: text)
     }
 }
