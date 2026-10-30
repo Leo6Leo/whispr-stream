@@ -386,9 +386,10 @@ class FinalizationTests(unittest.TestCase):
     def test_thinking_pause_is_compressed_only_for_the_final_decode(self):
         # Previews decode the real timeline and already show the spurious 。;
         # the final pass must decode the shrunken pause and not reuse them.
+        # The pause itself is never decoded as a preview.
         with_period = "所以我要。多花几秒钟时间"
         server = self.make_server(
-            ["所以我要", "所以我要。", with_period, "所以我要多花几秒钟时间"]
+            ["所以我要", with_period, "所以我要多花几秒钟时间"]
         )
         self.preview(server, [silence(3.0), voice(2.0)])
         final = self.final(server)
@@ -397,7 +398,7 @@ class FinalizationTests(unittest.TestCase):
         self.assertEqual(final["secs"], 10.0)
         self.assertEqual(
             server.session.lengths,
-            [samples(5.0), samples(8.0), samples(10.0), samples(7.5)],
+            [samples(5.0), samples(10.0), samples(7.5)],
         )
 
     def test_stable_preview_spanning_a_pause_is_not_reused_at_stop(self):
@@ -439,6 +440,16 @@ class FinalizationTests(unittest.TestCase):
         self.assertEqual(final["mode"], "fresh-final-pause-compressed")
         self.assertEqual(server.session.calls, [{}])
         self.assertEqual(server.session.lengths, [samples(1.1)])
+
+    def test_preview_stays_idle_through_a_pause_until_speech_returns(self):
+        # Three seconds of room tone are never decoded. Speech after the
+        # pause waits for 200 ms of voice, so the decode has a word to show.
+        server = self.make_server(["所以我要", "所以我要多花"], seconds=1.0)
+        self.preview(
+            server,
+            [silence(1.0), silence(1.0), silence(1.0), voice(0.1), voice(0.2)],
+        )
+        self.assertEqual(server.session.lengths, [samples(1.0), samples(4.3)])
 
     def test_vocabulary_check_uses_the_spoken_length_for_its_language(self):
         # 1.8 s idle + 0.5 s + 0.3 s is 2.6 s spoken; trimmed it is 1.3 s.

@@ -95,6 +95,14 @@ PREROLL_SEC = 0.3
 PAUSE_COMPRESS_MIN_GAP_SEC = 1.5
 PAUSE_COMPRESS_KEEP_SEC = 0.5
 
+# Previews skip audio that adds no speech. Past the 2 s silent-tail reuse,
+# every thinking pause used to be re-decoded in full every 150 ms: the decoder
+# was usually mid-way through room tone when speech resumed, and that wasted
+# decode time also lengthened the long-utterance cooldown. Once the audio
+# since the last decode has been quiet this long, the next decode waits for as
+# much speech as the first preview does, so it comes back with a word to show.
+PREVIEW_PAUSE_SEC = 0.5
+
 PREVIEW_FULL_SPEED_SEC = 4.0
 PREVIEW_ADAPTIVE_RAMP_SEC = 4.0
 PREVIEW_COOLDOWN_DECODE_RATIO = 2.0
@@ -1367,6 +1375,8 @@ class Server:
     def _loop(self) -> None:
         last_len = 0
         last_preview_empty = False
+        decoded_len = 0
+        paused = False
         self._preroll()
         while self.active:
             with self.lock:
@@ -1397,6 +1407,24 @@ class Server:
                     self._speech_gate_misses += 1
                 time.sleep(POLL_INTERVAL)
                 continue
+            # An empty preview keeps re-arming on every chunk instead.
+            if 0 < decoded_len <= full_len and not last_preview_empty:
+                since = full_audio[decoded_len:]
+                needed = (
+                    FIRST_PREVIEW_MIN_ACTIVE_WINDOWS
+                    if paused
+                    else SPEECH_MIN_ACTIVE_WINDOWS
+                )
+                if not has_speech(since, min_windows=needed):
+                    # Room tone cannot show a new word. Keep the decoder idle
+                    # so it is free the moment speech resumes.
+                    if len(since) >= int(PREVIEW_PAUSE_SEC * SAMPLE_RATE):
+                        paused = True
+                    if self._preview_stop.wait(timeout=POLL_INTERVAL):
+                        break
+                    continue
+            paused = False
+            decoded_len = full_len
             last_len = full_len
             reusable = self._reusable_preview(full_audio, context_revision)
             if (
