@@ -35,6 +35,14 @@ final class VoiceShortcutSettingsTests: XCTestCase {
         XCTAssertEqual(reloaded.asrContext, "Claude\nGitHub\nhaha github")
     }
 
+    func testRemoveFillerWordsDefaultsOnAndPersists() {
+        let defaults = makeDefaults()
+        let settings = Settings(defaults: defaults)
+        XCTAssertTrue(settings.removeFillerWords)
+        settings.removeFillerWords = false
+        XCTAssertFalse(Settings(defaults: defaults).removeFillerWords)
+    }
+
     func testContextAwareCapitalizationDefaultsOff() {
         XCTAssertFalse(Settings(defaults: makeDefaults()).contextAwareCapitalization)
     }
@@ -81,6 +89,20 @@ final class VoiceShortcutSettingsTests: XCTestCase {
         let preferencesIndex = try XCTUnwrap(steps.firstIndex(of: .preferences))
 
         XCTAssertEqual(steps[preferencesIndex + 1], .oneWordLanguage)
+    }
+
+    func testOptionalOnboardingStepsFollowTheirSubjects() throws {
+        let steps = OnboardingView.Step.allCases
+        let accessibilityIndex = try XCTUnwrap(steps.firstIndex(of: .accessibility))
+        let outputIndex = try XCTUnwrap(steps.firstIndex(of: .output))
+        let readyIndex = try XCTUnwrap(steps.firstIndex(of: .ready))
+
+        // The optional system-audio grant sits with the other permissions.
+        XCTAssertEqual(steps[accessibilityIndex + 1], .systemAudio)
+        // Learning from edits is introduced right after output choices.
+        XCTAssertEqual(steps[outputIndex + 1], .learning)
+        XCTAssertEqual(steps.last, .ready)
+        XCTAssertLessThan(try XCTUnwrap(steps.firstIndex(of: .learning)), readyIndex)
     }
 
     func testFirstDictationCoachUsesSelectedKeyAndActivationMode() {

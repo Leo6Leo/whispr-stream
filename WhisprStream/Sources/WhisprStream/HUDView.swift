@@ -6,6 +6,8 @@ import SwiftUI
 /// live transcript on the right. Model startup stays in the background.
 struct HUDView: View {
     @ObservedObject var state: AppState
+    @ObservedObject private var settings = Settings.shared
+    @Environment(\.colorScheme) private var colorScheme
     let onDragChanged: () -> Void
     let onDragEnded: () -> Void
 
@@ -25,6 +27,7 @@ struct HUDView: View {
     static let shadowInset: CGFloat = 30
 
     @State private var history: [CGFloat] = []
+    @State private var transcriptOverflows = false
 
     /// The leading slot is sized per phase. Giving the checkmark the waveform's
     /// full width would strand ~29pt of dead space on either side of it.
@@ -38,6 +41,16 @@ struct HUDView: View {
 
     private let surfaceCornerRadius: CGFloat = 24
 
+    /// Rainbow is the system-audio indicator, not decoration: it tells the
+    /// user the Mac's output, not their voice, is being transcribed.
+    private var isRainbow: Bool { settings.audioSource == .systemAudio }
+
+    /// Drives the hue drift. Paused outside active phases so an idle HUD
+    /// costs nothing.
+    private var isAnimatingRainbow: Bool {
+        isRainbow && (state.phase == .listening || state.phase == .thinking)
+    }
+
     var body: some View {
         hudContent
         .background {
@@ -45,17 +58,9 @@ struct HUDView: View {
                 .fill(.ultraThinMaterial)
                 .overlay {
                     RoundedRectangle(cornerRadius: surfaceCornerRadius, style: .continuous)
-                        .fill(Color.orange.opacity(state.isApproachingDictationLimit ? 0.18 : 0))
+                        .fill(Color.orange.opacity(orangeHighlightOpacity))
                 }
-                .overlay {
-                    RoundedRectangle(cornerRadius: surfaceCornerRadius, style: .continuous)
-                        .strokeBorder(
-                            state.isApproachingDictationLimit
-                                ? Color.orange.opacity(0.72)
-                                : Color.primary.opacity(0.07),
-                            lineWidth: state.isApproachingDictationLimit ? 1.2 : 0.5
-                        )
-                }
+                .overlay { border }
         }
         // Flatten before shadowing: a shadow applied straight to a material
         // fill renders behind the blur and muddies the panel instead of
@@ -82,6 +87,9 @@ struct HUDView: View {
         .animation(.spring(response: 0.30, dampingFraction: 0.85), value: state.displayText)
         .animation(.spring(response: 0.26, dampingFraction: 0.72), value: state.phase)
         .animation(.easeInOut(duration: 0.2), value: state.isApproachingDictationLimit)
+        .animation(.easeInOut(duration: 0.2), value: state.notice)
+        .animation(.easeInOut(duration: 0.2), value: showsPerformanceNotice)
+        .animation(.spring(response: 0.35, dampingFraction: 0.9), value: settings.audioSource)
         .onAppear { history = Array(repeating: 0, count: barCount) }
         .onChange(of: state.level) { _, new in
             var next = history
@@ -89,6 +97,13 @@ struct HUDView: View {
             next.append(new)
             history = next
         }
+    }
+
+    private var showsPerformanceNotice: Bool { state.performanceNoticeText != nil }
+
+    private var orangeHighlightOpacity: Double {
+        if state.isApproachingDictationLimit { return 0.18 }
+        return showsPerformanceNotice ? 0.13 : 0
     }
 
     private var hudContent: some View {
@@ -100,6 +115,36 @@ struct HUDView: View {
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 17)
+    }
+
+    /// All three rings stay in the tree and only their opacity changes. An
+    /// if/else here swapped view identity on every source switch, so SwiftUI
+    /// tore one ring down while fading a new gradient ring in from nothing.
+    private var border: some View {
+        let shape = RoundedRectangle(cornerRadius: surfaceCornerRadius, style: .continuous)
+        let atLimit = state.isApproachingDictationLimit
+        let warns = atLimit || showsPerformanceNotice
+        return ZStack {
+            shape.strokeBorder(Color.primary.opacity(0.07), lineWidth: 0.5)
+                .opacity(warns || isRainbow ? 0 : 1)
+            TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !isAnimatingRainbow)) { context in
+                let phase = RainbowPalette.phase(at: context.date)
+                shape.strokeBorder(
+                    AngularGradient(
+                        colors: RainbowPalette.stops(phase: phase, span: 1, count: 7) {
+                            RainbowPalette.accent(hue: $0, scheme: colorScheme)
+                        },
+                        center: .center,
+                        angle: .degrees(phase * 360)
+                    ),
+                    lineWidth: 1
+                )
+            }
+            .opacity(isRainbow && !warns ? (colorScheme == .dark ? 0.55 : 0.45) : 0)
+            shape.strokeBorder(Color.orange.opacity(0.72), lineWidth: 1.2)
+                // The pressure notice is a softer ring than the hard limit.
+                .opacity(atLimit ? 1 : showsPerformanceNotice ? 0.8 : 0)
+        }
     }
 
     // MARK: - Right hand side
@@ -122,7 +167,25 @@ struct HUDView: View {
 
     @ViewBuilder
     private var labelText: some View {
-        if !state.displayText.isEmpty && !isShowingFailure {
+        if let performanceNotice = state.performanceNoticeText {
+            // The final is taking longer while macOS reports memory or thermal
+            // pressure. Orange like the limit warning, and it clears itself.
+            Text(performanceNotice)
+                .font(.system(size: 15, weight: .medium, design: .rounded))
+                .foregroundStyle(.orange)
+                .lineLimit(1)
+                .transition(.opacity)
+                .accessibilityLabel(performanceNotice)
+        } else if let notice = state.notice {
+            // A passing message while still listening, for example when ⌥S
+            // cannot switch sources. Orange like the limit warning: something
+            // needs the user, but nothing was lost.
+            Text(notice)
+                .font(.system(size: 15, weight: .medium, design: .rounded))
+                .foregroundStyle(.orange)
+                .transition(.opacity)
+                .id(notice)
+        } else if !state.displayText.isEmpty && !isShowingFailure {
             transcript
                 .transition(.opacity)
         } else {
@@ -143,21 +206,85 @@ struct HUDView: View {
         switch state.phase {
         case .thinking: return "Transcribing…"
         case .failed(let message): return message
-        default: return "Listening…"
+        case .listening where state.isModelWaking:
+            // Not an error: the words arrive once the model is back in memory.
+            return "Waking up the speech model…"
+        default:
+            return settings.audioSource == .systemAudio ? "Listening to system audio…" : "Listening…"
         }
     }
 
     private var transcript: some View {
-        HStack(spacing: 0) {
-            Text(state.committed)
-                .foregroundStyle(.primary)
-            Text(state.tail)
-                .foregroundStyle(.secondary)
+        HUDLiveText(
+            committed: state.committed,
+            tail: state.tail,
+            committedColor: isRainbow ? .clear : .primary,
+            tailColor: .secondary
+        )
+        .overlay {
+            if isRainbow { rainbowCommittedText }
         }
         .font(.system(size: 15.5, weight: .medium, design: .rounded))
         .lineLimit(1)
-        .truncationMode(.head)
-        .frame(maxWidth: 540, alignment: .leading)
+        // Lay the line out at full width and slide it inside a clipped
+        // window. Head truncation re-laid the whole line on every preview,
+        // jumping every glyph left; a pinned trailing edge lets the capsule
+        // spring glide the sentence instead.
+        .fixedSize()
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+            transcriptOverflows = width > Self.transcriptMaxWidth
+        }
+        .frame(maxWidth: Self.transcriptMaxWidth, alignment: .trailing)
+        .mask {
+            LinearGradient(
+                stops: [
+                    .init(color: transcriptOverflows ? .clear : .black, location: 0),
+                    .init(color: .black, location: 0.06),
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            // The line crosses the window's edge once per utterance; fade the
+            // edge in rather than snapping the leftmost glyphs away.
+            .animation(.easeInOut(duration: 0.2), value: transcriptOverflows)
+        }
+        // The final transcript replaces the preview in one step, often with
+        // earlier words the 12 s preview window never showed. Springing that
+        // width change draws the longer line from the old leading edge, so
+        // the sentence rolled back toward its start just before the HUD
+        // closed. Swap it in place; the capsule still springs around it.
+        .transaction { transaction in
+            if state.phase == .inserted { transaction.animation = nil }
+        }
+    }
+
+    private static let transcriptMaxWidth: CGFloat = 540
+
+    /// The settled words carry the color; the changing tail stays
+    /// `.secondary` so the sentence still visibly settles. Only the gradient
+    /// redraws with the hue drift: the text is a mask with the same glyph
+    /// motion, so the drift never rebuilds the transcript.
+    private var rainbowCommittedText: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !isAnimatingRainbow)) { context in
+            let phase = RainbowPalette.phase(at: context.date)
+            LinearGradient(
+                colors: RainbowPalette.stops(phase: phase, span: 0.55) {
+                    RainbowPalette.text(hue: $0, scheme: colorScheme)
+                },
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+        }
+        .mask {
+            HUDLiveText(
+                committed: state.committed,
+                tail: state.tail,
+                committedColor: .white,
+                tailColor: .clear
+            )
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
     // MARK: - Leading indicator
@@ -177,7 +304,9 @@ struct HUDView: View {
                 .foregroundStyle(.orange)
                 .transition(.scale(scale: 0.3).combined(with: .opacity))
         case .thinking:
-            ThinkingDots()
+            ThinkingDots(colors: isRainbow
+                ? [0.0, 0.33, 0.62].map { RainbowPalette.accent(hue: $0, scheme: colorScheme) }
+                : Array(repeating: Color.accentColor, count: 3))
                 .transition(.opacity)
         default:
             waveform
@@ -185,19 +314,58 @@ struct HUDView: View {
         }
     }
 
+    /// Microphone mode keeps the plain 1.0.3 bars: one height spring per bar
+    /// and nothing else in the chain. The rainbow bars, with their hue drift,
+    /// exist only while system audio is the source; the two sets swap with a
+    /// fade driven by the root `audioSource` animation.
+    @ViewBuilder
     private var waveform: some View {
-        HStack(alignment: .center, spacing: barSpacing) {
-            ForEach(0..<barCount, id: \.self) { index in
-                Capsule(style: .continuous)
-                    .fill(Color.accentColor.opacity(0.9))
-                    .frame(width: barWidth, height: height(at: index))
-                    .animation(
-                        .spring(response: 0.28, dampingFraction: 0.62),
-                        value: height(at: index)
-                    )
+        if isRainbow {
+            TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !isAnimatingRainbow)) { context in
+                let phase = RainbowPalette.phase(at: context.date)
+                HStack(alignment: .center, spacing: barSpacing) {
+                    ForEach(0..<barCount, id: \.self) { index in
+                        rainbowBar(at: index, phase: phase)
+                    }
+                }
             }
+            .frame(width: waveformWidth, height: barMaxHeight)
+            .transition(.opacity)
+        } else {
+            HStack(alignment: .center, spacing: barSpacing) {
+                ForEach(0..<barCount, id: \.self) { index in
+                    Capsule(style: .continuous)
+                        .fill(Color.accentColor.opacity(0.9))
+                        .frame(width: barWidth, height: height(at: index))
+                        .animation(
+                            .spring(response: 0.28, dampingFraction: 0.62),
+                            value: height(at: index)
+                        )
+                }
+            }
+            .frame(width: waveformWidth, height: barMaxHeight)
+            .transition(.opacity)
         }
-        .frame(width: waveformWidth, height: barMaxHeight)
+    }
+
+    /// Colour lives outside the height spring. Inside it, every level update
+    /// would carry the fill along on an underdamped spring, so the drifting
+    /// hue overshot its target and the bars shimmered.
+    private func rainbowBar(at index: Int, phase: Double) -> some View {
+        Capsule(style: .continuous)
+            .frame(width: barWidth, height: height(at: index))
+            .animation(
+                .spring(response: 0.28, dampingFraction: 0.62),
+                value: height(at: index)
+            )
+            .foregroundStyle(rainbowBarColor(at: index, phase: phase))
+    }
+
+    /// The bars span ~60% of the wheel so neighbours blend instead of
+    /// striping red-next-to-violet.
+    private func rainbowBarColor(at index: Int, phase: Double) -> Color {
+        let hue = phase + 0.6 * Double(index) / Double(barCount - 1)
+        return RainbowPalette.accent(hue: hue, scheme: colorScheme).opacity(0.95)
     }
 
     private func height(at index: Int) -> CGFloat {
@@ -213,13 +381,14 @@ struct HUDView: View {
 
 /// Three dots pulsing in sequence while the final pass decodes.
 private struct ThinkingDots: View {
+    let colors: [Color]
     @State private var animating = false
 
     var body: some View {
         HStack(spacing: 7) {
             ForEach(0..<3, id: \.self) { i in
                 Circle()
-                    .fill(Color.accentColor)
+                    .fill(colors[i])
                     .frame(width: 7, height: 7)
                     .scaleEffect(animating ? 1.0 : 0.45)
                     .opacity(animating ? 1.0 : 0.4)

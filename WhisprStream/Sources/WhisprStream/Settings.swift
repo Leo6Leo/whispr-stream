@@ -148,6 +148,27 @@ enum ShortUtteranceLanguage: String, CaseIterable, Identifiable {
     }
 }
 
+/// What a dictation listens to.
+enum AudioSource: String, CaseIterable, Identifiable {
+    case microphone, systemAudio
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .microphone: return "Microphone"
+        case .systemAudio: return "System audio"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .microphone: return "Transcribe your voice."
+        case .systemAudio: return "Transcribe whatever your Mac is playing — videos, calls, podcasts. The live preview turns rainbow while it listens. Needs Screen & System Audio Recording access."
+        }
+    }
+}
+
 /// User preferences, persisted to UserDefaults.
 @MainActor
 final class Settings: ObservableObject {
@@ -190,6 +211,12 @@ final class Settings: ObservableObject {
         }
     }
 
+    /// Watch the destination field after inserting and keep hand edits to the
+    /// inserted text, with the utterance audio, as local training samples.
+    @Published var captureCorrections: Bool {
+        didSet { defaults.set(captureCorrections, forKey: Keys.captureCorrections) }
+    }
+
     var onLearningChange: (() -> Void)?
 
     /// Keep sentence-ending punctuation from the speech model. When disabled,
@@ -197,6 +224,11 @@ final class Settings: ObservableObject {
     /// not run into the previous one.
     @Published var usePunctuation: Bool {
         didSet { defaults.set(usePunctuation, forKey: Keys.usePunctuation) }
+    }
+
+    /// Drop hesitation sounds such as "um" and "呃" from finished dictations.
+    @Published var removeFillerWords: Bool {
+        didSet { defaults.set(removeFillerWords, forKey: Keys.removeFillerWords) }
     }
 
     /// Match the transcript's opening capitalization to text at the active
@@ -220,6 +252,10 @@ final class Settings: ObservableObject {
             defaults.set(shortUtteranceLanguage.rawValue, forKey: Keys.shortUtteranceLanguage)
             onShortUtteranceLanguageChange?(shortUtteranceLanguage)
         }
+    }
+
+    @Published var audioSource: AudioSource {
+        didSet { defaults.set(audioSource.rawValue, forKey: Keys.audioSource) }
     }
 
     @Published var playSound: Bool {
@@ -461,10 +497,13 @@ final class Settings: ObservableObject {
         static let copyToClipboard = "copyToClipboard"
         static let reviewUncertainWords = "reviewUncertainWords.v1"
         static let learnFromCorrections = "learnFromCorrections.v1"
+        static let captureCorrections = "captureCorrections.v1"
         static let usePunctuation = "usePunctuation"
+        static let removeFillerWords = "removeFillerWords"
         static let contextAwareCapitalization = "contextAwareCapitalization"
         static let shortUtteranceLanguage = "shortUtteranceLanguage"
         static let playSound = "playSound"
+        static let audioSource = "audioSource"
         static let insertSound = "insertSound"   // pre-pairs; read once to migrate
         static let soundTheme = "soundTheme"
         static let contextTerms = "contextTerms"
@@ -504,13 +543,17 @@ final class Settings: ObservableObject {
         copyToClipboard = defaults.object(forKey: Keys.copyToClipboard) as? Bool ?? true
         reviewUncertainWords = defaults.bool(forKey: Keys.reviewUncertainWords)
         learnFromCorrections = defaults.bool(forKey: Keys.learnFromCorrections)
+        captureCorrections = defaults.bool(forKey: Keys.captureCorrections)
         usePunctuation = defaults.object(forKey: Keys.usePunctuation) as? Bool ?? true
+        removeFillerWords = defaults.object(forKey: Keys.removeFillerWords) as? Bool ?? true
         contextAwareCapitalization = defaults.object(
             forKey: Keys.contextAwareCapitalization
         ) as? Bool ?? false
         shortUtteranceLanguage = ShortUtteranceLanguage.persistedValue(
             defaults.string(forKey: Keys.shortUtteranceLanguage)
         )
+        audioSource = AudioSource(rawValue: defaults.string(forKey: Keys.audioSource) ?? "")
+            ?? .microphone
         playSound = defaults.object(forKey: Keys.playSound) as? Bool ?? true
         // Migration: before pairs, the choice lived in `insertSound` as a bare
         // alert-sound name. Carry it over so an existing setting is preserved

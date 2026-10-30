@@ -109,4 +109,87 @@ final class TextInserterTests: XCTestCase {
             )
         )
     }
+    func testElectronUsesManualAccessibility() {
+        XCTAssertEqual(
+            TextInserter.webAccessibilityAttribute(manualSettable: true, enhancedSettable: true),
+            TextInserter.manualAccessibilityAttribute
+        )
+    }
+
+    func testChromiumFallsBackToEnhancedUserInterface() {
+        // Chrome and the ChatGPT desktop app report AXManualAccessibility as
+        // unsupported; without this fallback their composer is never found.
+        XCTAssertEqual(
+            TextInserter.webAccessibilityAttribute(manualSettable: false, enhancedSettable: true),
+            TextInserter.enhancedUserInterfaceAttribute
+        )
+    }
+
+    func testNoWebAccessibilitySwitchWhenNeitherIsSettable() {
+        XCTAssertNil(TextInserter.webAccessibilityAttribute(manualSettable: false, enhancedSettable: false))
+    }
+
+    private func privatePasteboard() -> NSPasteboard {
+        NSPasteboard(name: NSPasteboard.Name("WhisprStreamTests.\(UUID().uuidString)"))
+    }
+
+    func testInsertionWritesThePasteboardOnceAndKeepsWhatWasPasted() {
+        let pasteboard = privatePasteboard()
+        defer { pasteboard.releaseGlobally() }
+        pasteboard.clearContents()
+        pasteboard.setString("previous", forType: .string)
+        let before = pasteboard.changeCount
+        var pastes = 0
+        let delivered = expectation(description: "delivered")
+        TextInserter.deliver(
+            "Hello world", insertionText: " Hello world", insertAtCursor: true, copyToClipboard: true,
+            transport: .init(pasteboard: pasteboard, pressPaste: { _ in pastes += 1 })
+        ) { delivered.fulfill() }
+        wait(for: [delivered], timeout: 3)
+        XCTAssertEqual(pastes, 1)
+        XCTAssertEqual(pasteboard.changeCount - before, 1, "clipboard history must see one entry")
+        XCTAssertEqual(pasteboard.string(forType: .string), " Hello world")
+    }
+
+    func testRetainedInsertionCompletesOnlyAfterThePasteSettles() {
+        let pasteboard = privatePasteboard()
+        defer { pasteboard.releaseGlobally() }
+        var pastedAt: Date?
+        var completedAt: Date?
+        let delivered = expectation(description: "delivered")
+        TextInserter.deliver(
+            "Hello world", insertionText: "Hello world ", insertAtCursor: true, copyToClipboard: true,
+            transport: .init(pasteboard: pasteboard, pressPaste: { _ in pastedAt = Date() })
+        ) {
+            completedAt = Date()
+            delivered.fulfill()
+        }
+        wait(for: [delivered], timeout: 3)
+        let pasted = try? XCTUnwrap(pastedAt)
+        let completed = try? XCTUnwrap(completedAt)
+        XCTAssertNotNil(pasted)
+        XCTAssertNotNil(completed)
+        if let pasted, let completed {
+            // A cursor probe started on completion must not clear the
+            // pasteboard while the destination is still reading the paste.
+            XCTAssertGreaterThanOrEqual(completed.timeIntervalSince(pasted),
+                                        TextInserter.pasteSettleDelay - 0.05)
+        }
+    }
+
+    func testInsertionRestoresThePreviousClipboardWhenRetentionIsOff() {
+        let pasteboard = privatePasteboard()
+        defer { pasteboard.releaseGlobally() }
+        pasteboard.clearContents()
+        pasteboard.setString("previous", forType: .string)
+        let before = pasteboard.changeCount
+        let delivered = expectation(description: "delivered")
+        TextInserter.deliver(
+            "Hello world", insertionText: "Hello world ", insertAtCursor: true, copyToClipboard: false,
+            transport: .init(pasteboard: pasteboard, pressPaste: { _ in })
+        ) { delivered.fulfill() }
+        wait(for: [delivered], timeout: 3)
+        XCTAssertEqual(pasteboard.changeCount - before, 2, "one write for the paste, one restore")
+        XCTAssertEqual(pasteboard.string(forType: .string), "previous")
+    }
 }

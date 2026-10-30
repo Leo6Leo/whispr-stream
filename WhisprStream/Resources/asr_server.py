@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from itertools import product
 import json
 import os
 import re
@@ -61,6 +62,54 @@ SILENCE_MAX_PEAK = 0.06
 SPEECH_MIN_WINDOW_RMS = 0.015
 SPEECH_MIN_ACTIVE_WINDOWS = 3
 
+# The first preview used to decode the moment that gate passed, on 60-200 ms
+# of speech, and usually returned nothing: replaying 20 real recordings
+# (2026-10-22), 4 of 20 decodes at the gate instant had text with the
+# vocabulary prompt, 18 of 20 with 200 ms more speech. An empty decode still
+# occupies the decoder and then waited for MIN_NEW_AUDIO, so the first visible
+# word arrived ~760 ms after the press at best. Ask for 200 ms of speech-level
+# frames before the first preview only; finals keep the short gate so a
+# one-word utterance is never rejected. After a preview that decoded to
+# nothing, re-arm on the next microphone chunk instead of MIN_NEW_AUDIO.
+FIRST_PREVIEW_MIN_ACTIVE_WINDOWS = 10
+EMPTY_PREVIEW_MIN_NEW_AUDIO = POLL_INTERVAL
+
+# The first decode after a pause between dictations ran 830-1260 ms against
+# 120-320 ms back-to-back on the same audio length (field log, 2026-10-22,
+# with the Mac deep into swap), and whichever decode runs first pays it. The
+# preview thread therefore touches the model with a short silent decode the
+# moment an utterance starts: the first microphone chunks are still in
+# flight for ~400 ms, so a warm pre-roll (~70 ms) is free, and a cold one
+# overlaps the wait instead of delaying the first visible word.
+PREROLL_SEC = 0.3
+
+# On a Mac deep into swap the model's weights are paged out after a few idle
+# minutes, and the pre-roll or first preview then took 2.5-4 s (field log,
+# 2026-10-28/29): the HUD said "Listening…" with no words until the key was
+# released. When the model has been busy this long before any preview, the
+# app is told so it can say the model is waking instead of looking stuck.
+WARMING_NOTICE_SEC = 1.0
+
+# A thinking pause of a few seconds in the middle of a sentence reads to the
+# model as a sentence end ("所以我要。多花几秒钟时间"). Measured on six 30-40 s
+# zh/en dictations (2026-10-14): every raw decode placed a spurious terminator
+# at such a pause, and shrinking each internal quiet run to half a second
+# removed all of them while word errors around the pause fell back to the
+# no-pause baseline. Ordinary inter-sentence gaps stay below the threshold so
+# real sentence breaks keep their 。. Only the authoritative final decode sees
+# the compressed audio; previews follow the real timeline, and leading or
+# trailing silence is left alone so silent-tail preview reuse is unaffected.
+PAUSE_COMPRESS_MIN_GAP_SEC = 1.5
+PAUSE_COMPRESS_KEEP_SEC = 0.5
+
+# Previews skip audio that adds no speech. Past the 2 s silent-tail reuse,
+# every thinking pause used to be re-decoded in full every 150 ms: the decoder
+# was usually mid-way through room tone when speech resumed, and that wasted
+# decode time also lengthened the long-utterance cooldown. Once the audio
+# since the last decode has been quiet this long, the next decode waits for as
+# much speech as the first preview does, so it comes back with a word to show.
+PREVIEW_PAUSE_SEC = 0.5
+
 PREVIEW_FULL_SPEED_SEC = 4.0
 PREVIEW_ADAPTIVE_RAMP_SEC = 4.0
 PREVIEW_COOLDOWN_DECODE_RATIO = 2.0
@@ -86,6 +135,13 @@ PREVIEW_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+(?:['’][A-Za-z0-9_]+)*|\s+|.", re
 # verbatim (often the first one) even when the speaker said something unrelated.
 # Only that narrow result shape receives an unprompted verification pass.
 CONTEXT_SUPPORT_MIN_SIMILARITY = 2 / 3
+# A matching consonant skeleton (``Laura``/``LoRA``) only counts as spelling
+# evidence when the words are already close. Without these floors a skeleton
+# match treated ``have`` as ``Hevy`` and ``the`` as ``OAuth`` on every
+# dictation, rewriting ordinary words with no acoustic evidence at all.
+CONTEXT_SKELETON_MIN_SIMILARITY = 0.6
+CONTEXT_SKELETON_MIN_TERM_LENGTH = 3
+CONTEXT_SKELETON_MAX_LENGTH_DELTA = 1
 CONTEXT_PREVIEW_MAX_UNSEEN_SEC = 1.0
 CONTEXT_SPLIT_MIN_SIMILARITY = 0.75
 CONTEXT_SPLIT_MAX_WORDS = 3
@@ -125,12 +181,67 @@ class ReviewChoice:
         return None
 
 
+# At most this many disputed words become one stepped review. More than that
+# reads as a sentence rewrite, not a set of word choices, so nothing is asked.
+MAX_REVIEW_WORDS = 3
+
+
+@dataclass(frozen=True)
+class ReviewSet:
+    """One or more non-overlapping word choices over the same transcript.
+
+    Every choice is expressed against the full ``text`` (its own prefix and
+    suffix), so a single choice keeps the original wire shape exactly.
+    """
+    choices: tuple[ReviewChoice, ...]
+
+    @property
+    def text(self) -> str:
+        return self.choices[0].text
+
+    def payloads(self) -> list[dict]:
+        return [choice.payload() for choice in self.choices]
+
+    def for_transcript(self, text: str) -> ReviewSet | None:
+        """Re-anchor to whichever mix of preferred/alternative words ``text`` is.
+
+        The final may land on any combination of the held and revised words;
+        each choice is then re-expressed so ``preferred`` is what the final
+        actually contains. Anything else is a different sentence: no review.
+        """
+        base = self.text
+        slots = sorted(self.choices, key=lambda c: len(c.prefix))
+        for flips in product((False, True), repeat=len(slots)):
+            pieces: list[str] = []
+            spans: list[tuple[int, str, str]] = []
+            cursor = 0
+            length = 0
+            for choice, flipped in zip(slots, flips):
+                gap = base[cursor:len(choice.prefix)]
+                pieces.append(gap)
+                length += len(gap)
+                word, other = ((choice.alternative, choice.preferred) if flipped
+                               else (choice.preferred, choice.alternative))
+                spans.append((length, word, other))
+                pieces.append(word)
+                length += len(word)
+                cursor = len(choice.prefix) + len(choice.preferred)
+            pieces.append(base[cursor:])
+            if "".join(pieces) != text:
+                continue
+            return ReviewSet(tuple(
+                ReviewChoice(text[:start], word, other, text[start + len(word):])
+                for start, word, other in spans
+            ))
+        return None
+
+
 @dataclass(frozen=True)
 class ReusablePreview:
     result: DecodeResult
     mode: str
     unseen_samples: int
-    review: ReviewChoice | None = None
+    review: ReviewSet | None = None
 
 
 @dataclass(frozen=True)
@@ -157,7 +268,7 @@ class PreviewStabilizer:
         self.start = 0
         self.end = -1
         self.revision = -1
-        self.review: ReviewChoice | None = None
+        self.review: ReviewSet | None = None
 
     @staticmethod
     def _lexical(token: str) -> bool:
@@ -311,22 +422,26 @@ class PreviewStabilizer:
             self.raw, self.raw_support = incoming, raw_support
         self.start, self.end, self.revision = start, end, revision
         selected_text = "".join(selected)
-        if len(disputes) == 1:
-            offset, preferred, alternative = disputes[0]
-            # Ask only about one bounded lexical substitution. Whole-sentence
-            # rewrites, punctuation, omissions, and ambiguous alignments are
-            # not useful word choices and should not interrupt dictation.
-            if (
+        # Ask only about bounded lexical substitutions. Punctuation, omissions,
+        # whole-sentence rewrites and ambiguous alignments are not useful word
+        # choices; one such dispute, or too many disputes, means no question.
+        def askable(preferred: str, alternative: str) -> bool:
+            return (
                 0 < len(preferred.strip()) <= 48 and 0 < len(alternative.strip()) <= 48
                 and preferred.casefold() != alternative.casefold()
                 and all(any(c.isalnum() for c in term) for term in (preferred, alternative))
                 and all(len(term.split()) <= 3 and "\n" not in term
                         for term in (preferred, alternative))
-            ):
-                self.review = ReviewChoice(
-                    selected_text[:offset], preferred, alternative,
-                    selected_text[offset + len(preferred):],
-                )
+            )
+
+        if 0 < len(disputes) <= MAX_REVIEW_WORDS and all(
+            askable(preferred, alternative) for _, preferred, alternative in disputes
+        ):
+            self.review = ReviewSet(tuple(
+                ReviewChoice(selected_text[:offset], preferred, alternative,
+                             selected_text[offset + len(preferred):])
+                for offset, preferred, alternative in disputes
+            ))
         return selected_text
 
 
@@ -442,12 +557,22 @@ def latin_consonant_skeleton(text: str) -> str:
 
 
 def context_support_score(term: str, transcript: str) -> float:
-    """Score spelling evidence, including variants such as LoRA/Laura."""
+    """Score spelling evidence, including variants such as LoRA/Laura.
+
+    A shared consonant skeleton upgrades an already-similar spelling to full
+    support. It never rescues a distant one: ``have`` and ``Hevy`` share the
+    skeleton ``hv`` but are different words, as are ``the`` and ``OAuth``.
+    """
     score = context_text_similarity(term, transcript)
+    expected = normalized_context_text(term)
+    observed = normalized_context_text(transcript)
     expected_skeleton = latin_consonant_skeleton(term)
     observed_skeleton = latin_consonant_skeleton(transcript)
     if (
-        len(expected_skeleton) >= 2
+        score >= CONTEXT_SKELETON_MIN_SIMILARITY
+        and len(expected) >= CONTEXT_SKELETON_MIN_TERM_LENGTH
+        and abs(len(expected) - len(observed)) <= CONTEXT_SKELETON_MAX_LENGTH_DELTA
+        and len(expected_skeleton) >= 2
         and expected_skeleton == observed_skeleton
     ):
         return 1.0
@@ -488,6 +613,31 @@ def context_term_has_unprompted_support(term: str, transcript: str) -> bool:
     )
 
 
+# Everyday English words are never rewritten into a vocabulary term by the
+# unverified spelling pass. A vocabulary entry that *is* such a word still
+# matches exactly; only fuzzy (skeleton/edit-distance) rewrites are blocked.
+COMMON_ENGLISH_WORDS = frozenset("""
+a about above after again against all also am an and any are as at
+be because been before being below between both but by
+can could did do does doing done down during
+each even ever every few for from further
+get give go going got had has have having he her here hers him his how
+i if in into is it its just
+let like look made make many may me might more most much must my
+need never new no nor not now of off on once one only or other our out over own
+per pro put really right said same say see she should since so some still such
+take than that the their them then there these they this those through to too two
+under until up upon us use used very
+want was way we well were what when where which while who whom why will with
+would yes yet you your
+""".split())
+
+
+def is_common_english_word(text: str) -> bool:
+    """Return True for everyday words that fuzzy canonicalization must skip."""
+    return normalized_context_text(text) in COMMON_ENGLISH_WORDS
+
+
 def canonicalize_context_variants(transcript: str, context: str) -> str:
     """Restore vocabulary spelling for strong one- or multi-token variants.
 
@@ -512,6 +662,12 @@ def canonicalize_context_variants(transcript: str, context: str) -> str:
             observed = transcript[start:end]
             for term in terms:
                 if width == 1:
+                    if (
+                        is_common_english_word(observed)
+                        and normalized_context_text(observed)
+                        != normalized_context_text(term)
+                    ):
+                        continue
                     score = context_support_score(term, observed)
                     supported = score == 1.0
                 else:
@@ -681,8 +837,17 @@ def canonicalize_from_preview_context(
     for index, token in enumerate(transcript_tokens):
         term, score = best_supported_term(terms, token.text)
         # Preview evidence is weaker than an unprompted verification pass, so
-        # require exact normalized spelling or an identical consonant skeleton.
-        if term is not None and score == 1.0:
+        # require exact normalized spelling or an identical consonant skeleton,
+        # and never fuzzily rewrite an everyday word.
+        if (
+            term is not None
+            and score == 1.0
+            and (
+                not is_common_english_word(token.text)
+                or normalized_context_text(token.text)
+                == normalized_context_text(term)
+            )
+        ):
             candidates.append((index, index / transcript_denominator, term))
 
     replacements: list[tuple[int, int, str]] = []
@@ -725,16 +890,106 @@ def is_confident_silence(audio: np.ndarray) -> bool:
     return True
 
 
-def has_speech(audio: np.ndarray) -> bool:
+def compress_internal_pauses(
+    audio: np.ndarray,
+    min_gap: float = PAUSE_COMPRESS_MIN_GAP_SEC,
+    keep: float = PAUSE_COMPRESS_KEEP_SEC,
+) -> np.ndarray:
+    """Shrink every quiet run longer than ``min_gap`` that lies between speech.
+
+    Each such run keeps its first and last ``keep / 2`` seconds, so the decay
+    of the previous word and the onset of the next are preserved. Leading and
+    trailing silence are never touched. Returns the input array itself when
+    nothing changed, so callers can detect compression by length.
+    """
+    window = max(1, int(SILENCE_WINDOW_SEC * SAMPLE_RATE))
+    frames = len(audio) // window
+    if frames == 0:
+        return audio
+    framed = audio[:frames * window].reshape(frames, window)
+    quiet = np.sqrt(np.mean(framed * framed, axis=1)) < SPEECH_MIN_WINDOW_RMS
+    loud = np.flatnonzero(~quiet)
+    if len(loud) == 0:
+        return audio
+    first, last = int(loud[0]), int(loud[-1])
+    min_gap_samples = int(min_gap * SAMPLE_RATE)
+    keep_samples = int(keep * SAMPLE_RATE)
+    head = keep_samples // 2
+    pieces: list[np.ndarray] = []
+    cursor = 0
+    i = first
+    while i <= last:
+        if not quiet[i]:
+            i += 1
+            continue
+        j = i
+        while j <= last and quiet[j]:
+            j += 1
+        start, end = i * window, j * window
+        if end - start > min_gap_samples and end - start > keep_samples:
+            pieces.append(audio[cursor:start + head])
+            cursor = end - (keep_samples - head)
+        i = j
+    if not pieces:
+        return audio
+    pieces.append(audio[cursor:])
+    return np.concatenate(pieces)
+
+
+def trim_edge_silence(
+    audio: np.ndarray,
+    min_gap: float = PAUSE_COMPRESS_MIN_GAP_SEC,
+    keep: float = PAUSE_COMPRESS_KEEP_SEC,
+) -> tuple[np.ndarray, bool, bool]:
+    """Shrink leading and trailing quiet runs longer than ``min_gap`` to ``keep``.
+
+    Measured 2026-10-21 with real room tone around real speech (0.6B, 8-bit):
+    30 s of quiet before the first word made the model prepend invented text
+    ("走，走，走…") in 3 of 3 clips and 30 s after the last word appended it in
+    2 of 3, while 20 s did neither. A toggle-mode user who starts recording,
+    thinks, speaks, and then sits idle produces exactly that audio. Only the
+    quiet beyond ``keep`` next to the speech is removed, so onsets and decays
+    stay intact. Returns ``(audio, leading_trimmed, trailing_trimmed)``; the
+    input array itself comes back when nothing changed.
+    """
+    window = max(1, int(SILENCE_WINDOW_SEC * SAMPLE_RATE))
+    frames = len(audio) // window
+    if frames == 0:
+        return audio, False, False
+    framed = audio[:frames * window].reshape(frames, window)
+    loud = np.flatnonzero(
+        np.sqrt(np.mean(framed * framed, axis=1)) >= SPEECH_MIN_WINDOW_RMS
+    )
+    if len(loud) == 0:
+        return audio, False, False
+    min_gap_samples = int(min_gap * SAMPLE_RATE)
+    keep_samples = int(keep * SAMPLE_RATE)
+    start = 0
+    lead = int(loud[0]) * window
+    if lead > min_gap_samples:
+        start = lead - keep_samples
+    end = len(audio)
+    tail_start = (int(loud[-1]) + 1) * window
+    if len(audio) - tail_start > min_gap_samples:
+        end = tail_start + keep_samples
+    if start == 0 and end == len(audio):
+        return audio, False, False
+    return audio[start:end], start > 0, end < len(audio)
+
+
+def has_speech(
+    audio: np.ndarray,
+    min_windows: int = SPEECH_MIN_ACTIVE_WINDOWS,
+) -> bool:
     """Return True after enough speech-level frames, ignoring room tone/clicks."""
     window = max(1, int(SILENCE_WINDOW_SEC * SAMPLE_RATE))
     complete_frames = len(audio) // window
-    if complete_frames < SPEECH_MIN_ACTIVE_WINDOWS:
+    if complete_frames < min_windows:
         return False
 
     frames = audio[:complete_frames * window].reshape(complete_frames, window)
     rms = np.sqrt(np.mean(frames * frames, axis=1))
-    return int(np.count_nonzero(rms >= SPEECH_MIN_WINDOW_RMS)) >= SPEECH_MIN_ACTIVE_WINDOWS
+    return int(np.count_nonzero(rms >= SPEECH_MIN_WINDOW_RMS)) >= min_windows
 
 
 def preview_cooldown(
@@ -832,7 +1087,7 @@ class Server:
         self._last_preview_detected_language: str | None = None
         self._last_preview_stable = False
         self._last_preview_context_verified = False
-        self._last_preview_review: ReviewChoice | None = None
+        self._last_preview_review: ReviewSet | None = None
         self._last_context_preview_text: str | None = None
         self._last_context_preview_len = 0
         self._last_context_preview_start = 0
@@ -904,9 +1159,18 @@ class Server:
         self,
         audio: np.ndarray,
         context: str,
+        full_audio: np.ndarray | None = None,
     ) -> DecodeResult:
-        """Apply explicit short-utterance guidance after clip length is known."""
-        return self._decode_result(audio, context, self._language_for_audio(audio))
+        """Apply explicit short-utterance guidance after clip length is known.
+
+        ``full_audio`` is the uncompressed buffer when ``audio`` had its
+        internal pauses shrunk; the short-clip language preference follows the
+        length the user actually spoke for.
+        """
+        language_audio = audio if full_audio is None else full_audio
+        return self._decode_result(
+            audio, context, self._language_for_audio(language_audio)
+        )
 
     def _decode_final(self, audio: np.ndarray, context: str) -> str:
         """Apply short-utterance guidance only after clip length is known."""
@@ -919,12 +1183,17 @@ class Server:
         result: DecodeResult,
         preview_context: str | None = None,
         force_automatic_language: bool = False,
+        language_audio: np.ndarray | None = None,
     ) -> tuple[DecodeResult, str | None]:
         """Verify generated context words against an unprompted decode.
 
         A nearby spelling such as ``Cloud`` still supports ``Claude``. When an
         embedded prompted word disagrees, only that aligned word is replaced;
         the prompted sentence and punctuation stay intact.
+
+        ``language_audio`` is the uncompressed buffer when ``audio`` had its
+        pauses or edge silence shrunk, so the short-clip language choice
+        matches the prompted decode it is checking.
         """
         if not transcript_contains_context_word(result.text, context):
             canonical = canonicalize_context_variants(result.text, context)
@@ -951,7 +1220,9 @@ class Server:
             unbiased = self._decode_result(
                 audio,
                 "",
-                None if force_automatic_language else self._language_for_audio(audio),
+                None if force_automatic_language else self._language_for_audio(
+                    audio if language_audio is None else language_audio
+                ),
                 use_learned_context=False,
             )
         except Exception as error:
@@ -1056,7 +1327,7 @@ class Server:
         wait_ms: int,
         unseen_samples: int = 0,
         language: str | None = None,
-        review: ReviewChoice | None = None,
+        review: ReviewSet | None = None,
     ) -> None:
         event = {
             "type": "final",
@@ -1070,7 +1341,11 @@ class Server:
             "language": language or "unknown",
         }
         if review is not None and review.text == text:
-            event["review"] = review.payload()
+            # `review` keeps the original single-word shape; `reviews` carries
+            # every word when there are several.
+            event["reviews"] = review.payloads()
+            if len(review.choices) == 1:
+                event["review"] = review.choices[0].payload()
         emit(event)
 
     def _join_preview_thread(self, timeout: float | None = 5.0) -> bool:
@@ -1083,23 +1358,112 @@ class Server:
         self._thread = None
         return True
 
+    def _preroll(self) -> None:
+        """Pay any cold-start cost before there is audio worth decoding."""
+        with self.lock:
+            buffered = len(self.buf)
+        if (
+            not getattr(self, "_first_preview_pending", False)
+            or buffered >= int(MIN_SECONDS * SAMPLE_RATE)
+        ):
+            return
+        started = time.perf_counter()
+        self._model_busy_since = started
+        try:
+            self._decode_result(
+                np.zeros(int(PREROLL_SEC * SAMPLE_RATE), dtype=np.float32),
+                "",
+                use_learned_context=False,
+            )
+        except Exception as e:  # noqa: BLE001 - a failed pre-roll must never surface
+            print(f"[asr] preroll failed: {e}", file=sys.stderr, flush=True)
+            return
+        finally:
+            self._model_busy_since = None
+        self._preroll_ms = int((time.perf_counter() - started) * 1000)
+
+    def _watch_warming(self, utterance: int) -> None:
+        """Tell the app whenever a cold model holds back the first preview."""
+        notified_at: float | None = None
+        while self.active and self._utterance_seq == utterance:
+            busy_since = getattr(self, "_model_busy_since", None)
+            pending = getattr(self, "_first_preview_pending", False)
+            now = time.perf_counter()
+            if notified_at is None:
+                if not pending:
+                    return
+                if busy_since is not None and now - busy_since >= WARMING_NOTICE_SEC:
+                    notified_at = now
+                    emit({"type": "warming"})
+                    print(
+                        "[asr] warming notice: model busy "
+                        f"{int((now - busy_since) * 1000)}ms before the first preview",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            elif busy_since is None or not pending:
+                emit({"type": "warmed"})
+                if not pending:
+                    return
+                # A cold pre-roll can be followed by a cold first preview;
+                # keep watching until the first words are on screen.
+                notified_at = None
+            time.sleep(0.1)
+
     def _loop(self) -> None:
         last_len = 0
+        last_preview_empty = False
+        decoded_len = 0
+        paused = False
+        self._preroll()
         while self.active:
             with self.lock:
                 full_audio = self.buf.copy()
                 context = self.context
                 context_revision = self._context_revision
             full_len = len(full_audio)
-            grew = full_len - last_len >= int(MIN_NEW_AUDIO * SAMPLE_RATE)
+            first_pending = getattr(self, "_first_preview_pending", False)
+            min_new_audio = (
+                EMPTY_PREVIEW_MIN_NEW_AUDIO if last_preview_empty else MIN_NEW_AUDIO
+            )
+            grew = full_len - last_len >= int(min_new_audio * SAMPLE_RATE)
             if full_len < int(MIN_SECONDS * SAMPLE_RATE) or not grew:
                 time.sleep(POLL_INTERVAL)
                 continue
-            last_len = full_len
-            if not has_speech(full_audio):
+            min_windows = (
+                FIRST_PREVIEW_MIN_ACTIVE_WINDOWS
+                if first_pending
+                else SPEECH_MIN_ACTIVE_WINDOWS
+            )
+            if not has_speech(full_audio, min_windows=min_windows):
                 # Context terms are strong decoder hints, so never ask the
                 # model to interpret audio that contains only room tone.
+                # Re-check at the poll cadence rather than after another
+                # MIN_NEW_AUDIO of audio: counting a miss as "seen" made every
+                # soft first syllable cost 150 ms before the first preview.
+                if first_pending:
+                    self._speech_gate_misses += 1
+                time.sleep(POLL_INTERVAL)
                 continue
+            # An empty preview keeps re-arming on every chunk instead.
+            if 0 < decoded_len <= full_len and not last_preview_empty:
+                since = full_audio[decoded_len:]
+                needed = (
+                    FIRST_PREVIEW_MIN_ACTIVE_WINDOWS
+                    if paused
+                    else SPEECH_MIN_ACTIVE_WINDOWS
+                )
+                if not has_speech(since, min_windows=needed):
+                    # Room tone cannot show a new word. Keep the decoder idle
+                    # so it is free the moment speech resumes.
+                    if len(since) >= int(PREVIEW_PAUSE_SEC * SAMPLE_RATE):
+                        paused = True
+                    if self._preview_stop.wait(timeout=POLL_INTERVAL):
+                        break
+                    continue
+            paused = False
+            decoded_len = full_len
+            last_len = full_len
             reusable = self._reusable_preview(full_audio, context_revision)
             if (
                 reusable is not None
@@ -1114,7 +1478,11 @@ class Server:
             audio, preview_start = preview_audio(full_audio)
             try:
                 decode_started = time.perf_counter()
-                result = self._decode_preview_result(audio, context)
+                self._model_busy_since = decode_started
+                try:
+                    result = self._decode_preview_result(audio, context)
+                finally:
+                    self._model_busy_since = None
                 if result.context_verified:
                     text = self._stabilizer.update(
                         result.text, preview_start, full_len, context_revision
@@ -1125,6 +1493,7 @@ class Server:
                     self._stabilizer = PreviewStabilizer()
                     text = result.text
                 decode_seconds = time.perf_counter() - decode_started
+                last_preview_empty = not result.text
                 previous = (
                     self._prev
                     if context_revision == self._last_preview_context_revision
@@ -1160,6 +1529,18 @@ class Server:
                         self._last_context_preview_len = full_len
                         self._last_context_preview_start = preview_start
                         self._last_context_preview_revision = context_revision
+                if self.active and getattr(self, "_first_preview_pending", False):
+                    self._first_preview_pending = False
+                    print(
+                        "[asr] first preview: "
+                        f"since_start={int((time.perf_counter() - self._utterance_started) * 1000)}ms "
+                        f"audio={full_len / SAMPLE_RATE:.2f}s "
+                        f"decode={int(decode_seconds * 1000)}ms "
+                        f"preroll={getattr(self, '_preroll_ms', 0)}ms "
+                        f"gate_misses={self._speech_gate_misses} chars={len(text)}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 if self.active:
                     emit({
                         "type": "partial",
@@ -1170,6 +1551,7 @@ class Server:
                 if self.active:
                     emit({"type": "error", "message": f"partial: {e}"})
                 decode_seconds = 0.0
+                last_preview_empty = False
 
             cooldown = preview_cooldown(
                 full_len / SAMPLE_RATE,
@@ -1183,6 +1565,30 @@ class Server:
                 break
 
     # -- commands ------------------------------------------------------
+    def warm(self) -> None:
+        """Run one short decode so the first preview after a long idle does
+        not pay for evicted weights and cold kernels (measured: 659 ms vs
+        ~120 ms after nine idle hours). Sent by the app on wake and unlock;
+        skipped while an utterance is active or within a minute of the last
+        warm. Nothing is emitted; timing goes to the app log via stderr.
+        """
+        if self.active:
+            return
+        now = time.perf_counter()
+        if now - getattr(self, "_last_warm", float("-inf")) < 60:
+            return
+        self._last_warm = now
+        try:
+            self._decode_preview(np.zeros(int(0.5 * SAMPLE_RATE), dtype=np.float32), "")
+        except Exception as e:  # noqa: BLE001 - a failed warm must never surface
+            print(f"[asr] warm failed: {e}", file=sys.stderr, flush=True)
+            return
+        print(
+            f"[asr] warm: {int((time.perf_counter() - now) * 1000)}ms",
+            file=sys.stderr,
+            flush=True,
+        )
+
     def start(self, short_utterance_language: str | None = None) -> None:
         # A fast final can reach Swift before its superseded preview pass has
         # finished cleaning up. A new start command is already ordered ahead of
@@ -1210,6 +1616,12 @@ class Server:
         self.committed = ""
         self._prev = ""
         self._stabilizer = PreviewStabilizer()
+        # First-preview timing, reported once per utterance on stderr so the
+        # app log shows where a slow start spent its time.
+        self._utterance_started = time.perf_counter()
+        self._first_preview_pending = True
+        self._speech_gate_misses = 0
+        self._preroll_ms = 0
         requested_language = normalize_short_utterance_language(
             short_utterance_language
         )
@@ -1220,8 +1632,12 @@ class Server:
         )
         self._preview_stop.clear()
         self.active = True
+        self._utterance_seq = getattr(self, "_utterance_seq", 0) + 1
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
+        threading.Thread(
+            target=self._watch_warming, args=(self._utterance_seq,), daemon=True
+        ).start()
 
     def audio(self, b64: str) -> None:
         pcm = np.frombuffer(base64.b64decode(b64), dtype=np.int16)
@@ -1269,10 +1685,26 @@ class Server:
             self._join_preview_thread()
             return
 
+        # The final decode sees a shortened timeline: long thinking pauses
+        # inside the speech and long quiet before or after it are what make
+        # the model emit a spurious sentence break or invented words.
+        compressed = compress_internal_pauses(audio)
+        pause_compressed = len(compressed) != len(audio)
+        decode_audio, lead_trimmed, tail_trimmed = trim_edge_silence(compressed)
+        # Previews decoded the real timeline. One that spans a long internal
+        # pause already carries the spurious break, and one that follows a
+        # long leading silence may carry invented words ahead of the speech,
+        # so neither may stand in for the final decode. Trailing silence needs
+        # no such rule: reuse is already limited to a MAX_SILENT_REUSE_TAIL
+        # tail, far below the length at which the model starts inventing.
+        preview_reusable = not pause_compressed and not lead_trimmed
+
         # Fastest path: a previously completed preview already contains the
         # whole utterance (or differs only by a short stable silence tail). Emit
         # before waiting for a newer, now-unneeded preview that may be in flight.
-        reusable = self._reusable_preview(audio, context_revision)
+        reusable = None
+        if preview_reusable:
+            reusable = self._reusable_preview(audio, context_revision)
         if reusable is not None and reusable.result.context_verified:
             self._emit_final(
                 reusable.result.text,
@@ -1297,7 +1729,9 @@ class Server:
         # The in-flight preview may have completed on exactly the final buffer
         # while stop() was waiting. Reuse it before scheduling another pass.
         preview_context = self._recent_context_preview(audio, context_revision)
-        reusable = self._reusable_preview(audio, context_revision)
+        reusable = None
+        if preview_reusable:
+            reusable = self._reusable_preview(audio, context_revision)
         if reusable is not None:
             result = reusable.result
             inference_started = time.perf_counter()
@@ -1332,15 +1766,20 @@ class Server:
 
         inference_started = time.perf_counter()
         try:
-            result = self._decode_final_result(audio, context)
+            result = self._decode_final_result(
+                decode_audio, context, full_audio=audio
+            )
             # Automatic language detection must preserve intentional mixed
             # speech. Script counts cannot distinguish it from a translation;
             # only the user's explicit short-clip preference forces a language.
+            # The unbiased check decodes the same compressed audio so that both
+            # transcripts align word for word.
             result, context_check = self._verify_context_result(
-                audio,
+                decode_audio,
                 context,
                 result,
                 preview_context,
+                language_audio=audio,
             )
             review = None
             if (
@@ -1359,6 +1798,10 @@ class Server:
             return
         inference_ms = int((time.perf_counter() - inference_started) * 1000)
         mode = "fresh-final"
+        if pause_compressed:
+            mode += "-pause-compressed"
+        if lead_trimmed or tail_trimmed:
+            mode += "-edge-trimmed"
         if context_check is not None:
             mode += f"-{context_check}"
         self._emit_final(
@@ -1416,6 +1859,8 @@ def main() -> int:
                 server.set_context(msg.get("text", ""))
             elif cmd == "learned_context":
                 server.set_learned_context(msg.get("text", ""))
+            elif cmd == "warm":
+                server.warm()
             elif cmd == "quit":
                 break
         except Exception as e:

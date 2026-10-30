@@ -10,7 +10,10 @@ final class ASRService {
     enum Event {
         case ready(ms: Int)
         case partial(committed: String, tail: String)
-        case final(text: String, secs: Double, ms: Int, review: DictationReview? = nil)
+        /// The model has been busy past a second before the first preview,
+        /// typically paged out after idle (true), and is now done (false).
+        case warming(Bool)
+        case final(text: String, secs: Double, ms: Int, reviews: [DictationReview] = [])
         case error(String)
         case terminated(String)
     }
@@ -68,13 +71,13 @@ final class ASRService {
     }
 
     private static func makeLogHandle() -> FileHandle? {
-        let url = logURL
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
-        }
-        guard let handle = try? FileHandle(forWritingTo: url) else { return nil }
-        handle.seekToEndOfFile()
-        return handle
+        // O_APPEND, not a one-time seek: the sidecar keeps this handle for
+        // hours while Log.write appends the app's own lines. A handle merely
+        // seeked to the end at launch keeps that stale offset and every later
+        // sidecar line overwrites whatever the app logged since.
+        let descriptor = open(logURL.path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+        guard descriptor >= 0 else { return nil }
+        return FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
     }
 
     func start() throws {
@@ -107,6 +110,9 @@ final class ASRService {
             switch type {
             case "ready":
                 event = .ready(ms: obj["ms"] as? Int ?? 0)
+            case "warming", "warmed":
+                Log.write("asr \(type)")
+                event = .warming(type == "warming")
             case "partial":
                 event = .partial(
                     committed: obj["committed"] as? String ?? "",
@@ -129,7 +135,9 @@ final class ASRService {
                     text: obj["text"] as? String ?? "",
                     secs: seconds,
                     ms: inferenceMS,
-                    review: DictationReview.parse(obj["review"], transcript: obj["text"] as? String ?? "")
+                    reviews: DictationReview.parseAll(
+                        obj["reviews"], single: obj["review"], transcript: obj["text"] as? String ?? ""
+                    )
                 )
             default:
                 let message = obj["message"] as? String ?? "unknown"
@@ -209,6 +217,10 @@ final class ASRService {
     /// Push edited vocabulary to the resident sidecar. The model is not reloaded,
     /// so this is cheap enough to call on every keystroke in Settings.
     func setContext(_ terms: String) { send(["cmd": "context", "text": terms]) }
+
+    /// One short decode so the first preview after a long idle is not cold.
+    /// The sidecar ignores it during an utterance and rate-limits it.
+    func warm() { send(["cmd": "warm"]) }
 
     /// `pcm` must be mono 16 kHz signed 16-bit.
     func sendAudio(_ pcm: Data) {

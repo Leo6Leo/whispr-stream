@@ -36,7 +36,7 @@ The app checks available storage before either download and checks again before 
 
 ## Experimental optional models
 
-Custom-model support is not available in the public 1.0.3 app. It remains behind a compile-time gate while its validation and runtime packaging are completed. The two built-in Qwen3-ASR choices remain available normally.
+Custom-model support is not available in the public 1.0.5 app. It remains behind a compile-time gate while its validation and runtime packaging are completed. The two built-in Qwen3-ASR choices remain available normally.
 
 Local source builds enable the experiment by default. In those builds, open **Settings → Model → Add Custom Model…**. Custom entries can use a Hugging Face model id or an existing local folder:
 
@@ -50,6 +50,8 @@ To test the public configuration from source, build with `ENABLE_OPTIONAL_MODELS
 ## Permissions and menu-bar behavior
 
 Onboarding asks for Microphone access and Accessibility access. Microphone is needed to capture speech; Accessibility is needed to see the recording shortcut globally and insert text at the cursor. If you choose **Skip for now**, the final screen will say **Finish setup later** and you can grant access from **Settings → Permissions**.
+
+Two later steps are optional and never block **Continue**. **Screen & System Audio Recording** is the permission macOS routes system audio through; it is only needed to dictate what your Mac is playing, and the same grant is available under **Settings → Permissions → Optional access**. **Learn from edits** (off by default) keeps a sentence you corrected after pasting, with its recording, on this Mac as a training sample; it can be changed later under **Settings → General → Uncertain words**.
 
 Click **Grant** in the Setup Guide's microphone step, or **Grant Access** under
 **Settings → Permissions**, to show the macOS consent dialog. Moving the app into

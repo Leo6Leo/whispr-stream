@@ -6,14 +6,14 @@ WhisprStream ships a small native app and a separately downloadable Apple-silico
 
 Use a relocatable standalone CPython 3.12 distribution. Do not use Homebrew Python or a venv.
 
-Public app version `1.0.3` compiles optional models out and intentionally reuses the immutable `WhisprStream-runtime-1.0.0-arm64.zip` asset. Do not rebuild or replace that asset under its existing version or URL. The signed app also pins the complete extracted runtime tree, including the bytecode shipped in that immutable archive; installed runtime verification never deletes or rewrites files.
+Public app version `1.0.5` compiles optional models out and intentionally reuses the immutable `WhisprStream-runtime-1.0.0-arm64.zip` asset. Do not rebuild or replace that asset under its existing version or URL. The signed app also pins the complete extracted runtime tree, including the bytecode shipped in that immutable archive; installed runtime verification never deletes or rewrites files.
 
 The current `build-runtime.sh` includes the experimental MLX Whisper adapter and is for a future runtime version only. Before enabling optional models publicly, resolve the deferred model-validation work, assign a new immutable runtime version (for example `1.1.0`), build it, and update every runtime value below.
 
 ## 2. Build the app
 
-Version `1.0.3` ships dictation only; Meeting Notes are unavailable. Build it
-from `codex/release-v1.0.3` without merging the experimental Meetings branch.
+Version `1.0.5` ships dictation only; Meeting Notes are unavailable. Build it
+from `release-v1.0.5` without merging the experimental Meetings branch.
 `ENABLE_MEETINGS` defaults to `0`; any other value aborts before compilation
 or replacement of the app bundle. The builder and ZIP validator require actual
 plist booleans `LSUIElement=true` and `WhisprMeetingsEnabled=false`.
@@ -55,11 +55,11 @@ The expected code-signing certificate SHA-1 is independently pinned in
 an update key, repository, or signing identity that differs from these reviewed
 trust roots. Change a pin only as an explicit key-rotation procedure.
 
-App version `1.0.3` intentionally reuses runtime version `1.0.0`; the runtime
+App version `1.0.5` intentionally reuses runtime version `1.0.0`; the runtime
 version changes only when the standalone Python or dependency payload changes.
 
 ```bash
-RELEASE=1 VERSION=1.0.3 BUILD_NUMBER=6 ENABLE_OPTIONAL_MODELS=0 \
+RELEASE=1 VERSION=1.0.5 BUILD_NUMBER=9 ENABLE_OPTIONAL_MODELS=0 \
 BUNDLE_IDENTIFIER="com.leoleo.whisprstream" \
 SIGNING_IDENTITY="WhisprStream Self-Signed" \
 RUNTIME_VERSION=1.0.0 \
@@ -104,7 +104,7 @@ shasum -a 256 WhisprStream-macos-arm64.zip \
   WhisprStream-runtime-1.0.0-arm64.zip > SHA256SUMS
 WhisprStream/validate-release.sh WhisprStream-macos-arm64.zip \
   WhisprStream-runtime-1.0.0-arm64.zip SHA256SUMS \
-  WhisprStream-macos-arm64.zip.ed25519 1.0.3 6
+  WhisprStream-macos-arm64.zip.ed25519 1.0.5 9
 ```
 
 ## Local updater dry runs
@@ -155,7 +155,7 @@ Self-signing does not provide Apple trust, does not notarize the app, and does n
 
 ## 4. Draft release and clean-Mac qualification
 
-For this release, create a draft GitHub Release tagged `v1.0.3`, upload:
+For this release, create a draft GitHub Release tagged `v1.0.5`, upload:
 
 - `WhisprStream-macos-arm64.zip`
 - `WhisprStream-macos-arm64.zip.ed25519`
@@ -185,8 +185,33 @@ On a fresh macOS user account with no previous microphone grant, explicitly veri
 Moving an app into Applications does not register a microphone request. Local
 non-hardened builds and accounts with existing grants do not qualify this check.
 
-Before approving 1.0.3, also exercise these dictation regressions with the built
-candidate:
+Before approving 1.0.5, exercise system-audio dictation with the built
+candidate on an account that has not yet granted Screen & System Audio
+Recording:
+
+- In Setup Guide, the optional **Screen & System Audio Recording** step must
+  show its card as not granted, **Continue** must work without granting, and
+  **Grant** must show the native prompt once and then open the Screen & System
+  Audio Recording pane. The later **Help WhisprStream learn** step must show
+  *Learn from edits I make* off by default and persist a change to
+  Settings → General → Uncertain words.
+- Choose **System audio** in Settings, grant access from the row there, and
+  dictate while a video plays. The HUD must turn rainbow, the transcript must
+  follow the video, and WhisprStream's own start/finish sounds must not appear.
+- Press ⌥S mid-dictation in both directions. The source and rainbow tint must
+  switch without restarting the utterance, ⌥S must not type "ß" into the
+  editor, and ⌥S must type normally again once dictation ends.
+- With permission denied and **System audio** selected, the shortcut must not
+  start recording: the HUD must show "System audio needs Screen & System Audio
+  Recording" and Settings must open on the Permissions tab, with no system
+  prompt. Pressing ⌥S from a microphone dictation without the grant must keep
+  recording on the microphone and show an orange notice in the HUD naming the
+  grant, without opening any window. Revoking the grant in System Settings
+  while a system-audio dictation is live must end it with "System audio
+  unavailable". After each case, switching back to **Microphone** must dictate
+  normally.
+
+Also exercise these dictation regressions with the built candidate:
 
 - Final recognition must retain negations, rewrites, and newly spoken tails even
   if the live preview held an older phrase. Word review may offer the earlier
@@ -212,6 +237,13 @@ candidate:
   probing, and final paste. The badge may update immediately, but the automatic
   window must wait until dictation and clipboard cleanup finish, then appear
   once. Include rapid consecutive dictations while an update is pending.
+- Update an installed 1.0.3 copy with **Install and Relaunch**. The 1.0.3
+  helper spawns the new app as its child, so the log must show
+  `update relaunch: spawned as a child of helper` followed by
+  `update relaunch: new instance pid=`, and the first dictation afterwards
+  must capture audio without quitting and reopening by hand. The relaunched
+  process's `launch:` line must report `responsible=` equal to its own pid.
+  An update performed by the 1.0.4 helper (LaunchServices) must not relaunch.
 - Check ordinary Spaces and another app's native full-screen Space, including
   switching Spaces during recording, on macOS 14 and a supported newer system.
   Pure lifecycle tests do not qualify real window visibility or focus behavior.
@@ -237,8 +269,8 @@ SDK explicitly, set `WHISPR_TEST_SWIFT_SDK` when running these Python tests.
 
 The standalone checks do not replace the complete Swift test suite or signed
 archive validation. Rebuild and sign the app archive from the qualified source;
-the previously checked-in 1.0.2 archive is not a 1.0.3 candidate. Increment the
-build number again if a build 6 candidate has already been distributed.
+the previously checked-in 1.0.4 archive is not a 1.0.5 candidate. Increment the
+build number again if a build 9 candidate has already been distributed. Build 7 was published briefly on 2026-10-16 and withdrawn; it must not be reused.
 
 ## 5. Website and update checks
 
@@ -293,6 +325,6 @@ testing without relaunching.
 This mode is developer-only and is never included as a public runtime path.
 
 Local builds enable experimental optional models by default. Use
-`ENABLE_OPTIONAL_MODELS=0 WhisprStream/build.sh` to reproduce the public 1.0.3
+`ENABLE_OPTIONAL_MODELS=0 WhisprStream/build.sh` to reproduce the public 1.0.5
 model UI and runtime requirements. `RELEASE=1` always enforces that setting and
 cannot be overridden.

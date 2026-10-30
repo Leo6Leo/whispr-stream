@@ -1,7 +1,9 @@
 import AVFoundation
 import SwiftUI
 
-/// First-run guided setup: welcome, the two permissions, preferences, done.
+/// First-run guided setup: welcome, the two required permissions, the
+/// optional system-audio permission, preferences, an opt-in for learning
+/// from edits, done. The optional steps never block "Continue".
 ///
 /// Permission state is polled rather than pushed — macOS has no callback for
 /// Accessibility — so a card flips to "granted" on its own moments after the
@@ -24,7 +26,7 @@ struct OnboardingView: View {
     var onFinish: () -> Void
 
     enum Step: Int, CaseIterable {
-        case welcome, runtime, model, microphone, accessibility, preferences, oneWordLanguage, output, voiceShortcut, ready
+        case welcome, runtime, model, microphone, accessibility, systemAudio, preferences, oneWordLanguage, output, learning, voiceShortcut, ready
     }
 
     var body: some View {
@@ -38,9 +40,11 @@ struct OnboardingView: View {
                 case .model: modelStep
                 case .microphone: microphoneStep
                 case .accessibility: accessibilityStep
+                case .systemAudio: systemAudioStep
                 case .preferences: preferencesStep
                 case .oneWordLanguage: oneWordLanguageStep
                 case .output: outputStep
+                case .learning: learningStep
                 case .voiceShortcut: voiceShortcutStep
                 case .ready: readyStep
                 }
@@ -353,6 +357,43 @@ struct OnboardingView: View {
         }
     }
 
+    /// Optional. macOS routes system audio through Screen & System Audio
+    /// Recording, so the grant is offered where the feature is introduced,
+    /// but never required: Continue works without it, and Settings →
+    /// Permissions offers the same grant later.
+    private var systemAudioStep: some View {
+        StepLayout(
+            icon: "play.rectangle",
+            title: "Transcribe what your Mac plays",
+            blurb: "Optional. Dictate videos, calls, and podcasts. Only audio is captured."
+        ) {
+            VStack(spacing: 14) {
+                PermissionCard(
+                    title: "Screen & System Audio Recording",
+                    granted: permissions.screenCapture,
+                    denied: false,
+                    action: { permissions.requestScreenCapture() }
+                )
+
+                if permissions.screenCapture {
+                    Text("Press **⌥S** while dictating to switch sources.")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 12)
+                        .transition(.opacity)
+                } else {
+                    Text("You can skip this. Mic dictation doesn't need it.")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 12)
+                        .transition(.opacity)
+                }
+            }
+        }
+    }
+
     private var preferencesStep: some View {
         StepLayout(
             icon: "slider.horizontal.3",
@@ -472,6 +513,29 @@ struct OnboardingView: View {
                 Color.clear.frame(height: 12)
             }
             .onboardingSurface()
+            .frame(width: 430)
+        }
+    }
+
+    /// Opt-in, off by default. Learning from edits reads the pasted-into field
+    /// through the Accessibility grant already made and keeps the sample on
+    /// this Mac, so this step is consent and explanation, not a permission.
+    private var learningStep: some View {
+        StepLayout(
+            icon: "sparkles",
+            title: "Help WhisprStream learn",
+            blurb: "Optional. Fix a word after dictating, and WhisprStream learns from it."
+        ) {
+            VStack(spacing: 12) {
+                OnboardingToggleRow(
+                    symbol: "pencil.line",
+                    title: "Learn from my edits",
+                    detail: "Stays on this Mac. Review or delete anytime in Settings.",
+                    isOn: $settings.captureCorrections
+                )
+                .padding(.vertical, 4)
+                .onboardingSurface()
+            }
             .frame(width: 430)
         }
     }
@@ -1028,31 +1092,45 @@ private struct ProgressDots: View {
 }
 
 /// Waveform bars that idle in a gentle loop — the welcome screen's mark.
+///
+/// Driven by a timeline clock rather than `repeatForever`: the Setup Guide
+/// re-renders while it polls permissions, and a re-applied repeating
+/// animation hitched on every re-render. Each bar breathes between 42% and
+/// 100% of its height on a 0.72 s ease-in-out half-cycle, 90 ms behind the
+/// bar before it, and holds still under Reduce Motion.
 private struct AnimatedMark: View {
-    @State private var animating = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var startedAt = Date()
     private let heights: [CGFloat] = [0.35, 0.62, 1.0, 0.72, 0.45]
+    private static let halfCycle: TimeInterval = 0.72
+    private static let stagger: TimeInterval = 0.09
 
     var body: some View {
-        HStack(spacing: 6) {
-            ForEach(heights.indices, id: \.self) { i in
-                Capsule()
-                    .fill(
-                        LinearGradient(
-                            colors: [Color.accentColor, Color.accentColor.opacity(0.65)],
-                            startPoint: .top, endPoint: .bottom
+        TimelineView(.animation(paused: reduceMotion)) { context in
+            let elapsed = context.date.timeIntervalSince(startedAt)
+            HStack(spacing: 6) {
+                ForEach(heights.indices, id: \.self) { i in
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [Color.accentColor, Color.accentColor.opacity(0.65)],
+                                startPoint: .top, endPoint: .bottom
+                            )
                         )
-                    )
-                    .frame(width: 8, height: 64 * heights[i] * (animating ? 1.0 : 0.42))
-                    .animation(
-                        .easeInOut(duration: 0.72)
-                            .repeatForever(autoreverses: true)
-                            .delay(Double(i) * 0.09),
-                        value: animating
-                    )
+                        .frame(width: 8, height: 64 * heights[i] * scale(at: elapsed, bar: i))
+                }
             }
         }
         .frame(height: 76)
-        .onAppear { animating = true }
+    }
+
+    /// 0.42…1.0 and back, ease-in-out, starting from rest like the old loop.
+    private func scale(at elapsed: TimeInterval, bar: Int) -> CGFloat {
+        guard !reduceMotion else { return 1 }
+        let local = max(0, elapsed - Double(bar) * Self.stagger)
+        let phase = (local / (2 * Self.halfCycle)).truncatingRemainder(dividingBy: 1)
+        let wave = 0.5 - 0.5 * cos(2 * .pi * phase)
+        return 0.42 + 0.58 * CGFloat(wave)
     }
 }
 

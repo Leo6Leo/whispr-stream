@@ -21,10 +21,20 @@ final class AppState: ObservableObject {
     @Published var lastDurationMS: Int = 0
     @Published var lastAudioSecs: Double = 0
     @Published var dictationElapsedSeconds: TimeInterval = 0
+    /// A passing message shown in place of the transcript while listening,
+    /// for example when ⌥S cannot switch to system audio. Clears itself.
+    @Published var notice: String?
+    /// The speech model is still waking (paged back in after idle) and no
+    /// preview has arrived yet. The HUD says so instead of "Listening…".
+    @Published var isModelWaking = false
+    @Published private(set) var performanceCondition = SystemPerformanceCondition.normal
+    @Published private(set) var isPerformanceNoticeVisible = false
 
     var onDictationLimitReached: (() -> Void)?
 
     private var dictationTimer: Timer?
+    private var noticeWork: DispatchWorkItem?
+    private var performanceNoticeWork: DispatchWorkItem?
     private var dictationStartedAtUptime: TimeInterval?
     private var didReachDictationLimit = false
 
@@ -45,6 +55,13 @@ final class AppState: ObservableObject {
         "\(Int(ceil(dictationRemainingSeconds)))s"
     }
 
+    /// Shown only after a transcription has already waited a moment while
+    /// macOS reports memory or thermal pressure, so a normal wait never warns.
+    var performanceNoticeText: String? {
+        guard phase == .thinking, isPerformanceNoticeVisible else { return nil }
+        return performanceCondition.hudMessage
+    }
+
     var isVisible: Bool {
         switch phase {
         case .idle: return false
@@ -58,6 +75,63 @@ final class AppState: ObservableObject {
         tail = ""
         level = 0
         dictationElapsedSeconds = 0
+        isModelWaking = false
+        finishTranscriptionWait()
+        clearNotice()
+    }
+
+    func showNotice(_ text: String, for duration: TimeInterval = 2.6) {
+        noticeWork?.cancel()
+        notice = text
+        let work = DispatchWorkItem { [weak self] in self?.clearNotice() }
+        noticeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: work)
+    }
+
+    func updatePerformanceCondition(_ condition: SystemPerformanceCondition) {
+        performanceCondition = condition
+        guard condition != .normal else {
+            finishTranscriptionWait()
+            return
+        }
+        guard phase == .thinking, !isPerformanceNoticeVisible else { return }
+        schedulePerformanceNotice()
+    }
+
+    /// Enters `.thinking` and arms the pressure notice for a slow final.
+    func beginTranscriptionWait(noticeDelay: TimeInterval = 1.0) {
+        finishTranscriptionWait()
+        phase = .thinking
+        schedulePerformanceNotice(after: noticeDelay)
+    }
+
+    func finishTranscriptionWait() {
+        performanceNoticeWork?.cancel()
+        performanceNoticeWork = nil
+        isPerformanceNoticeVisible = false
+    }
+
+    private func schedulePerformanceNotice(after delay: TimeInterval = 1.0) {
+        guard performanceCondition != .normal,
+              phase == .thinking,
+              performanceNoticeWork == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            MainActor.assumeIsolated {
+                self.performanceNoticeWork = nil
+                guard self.phase == .thinking,
+                      self.performanceCondition != .normal else { return }
+                self.isPerformanceNoticeVisible = true
+            }
+        }
+        performanceNoticeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    func clearNotice() {
+        noticeWork?.cancel()
+        noticeWork = nil
+        notice = nil
     }
 
     func startDictationTimer() {

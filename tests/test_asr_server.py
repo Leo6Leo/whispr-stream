@@ -172,6 +172,55 @@ class ContextHallucinationTests(unittest.TestCase):
             "Testing LoRA",
         )
 
+    def test_skeleton_match_never_rewrites_everyday_words(self):
+        # ``have``/``Hevy`` and ``the``/``OAuth`` share consonant skeletons
+        # but are different words; a user hit this on every dictation.
+        context = "Claude\nPR\nHevy\nOAuth"
+        for sentence in (
+            "I have the thing",
+            "the user said so",
+            "go downtown per the plan",
+            "I was pro that idea",
+        ):
+            self.assertEqual(
+                asr_server.canonicalize_context_variants(sentence, context),
+                sentence,
+            )
+        self.assertLess(
+            asr_server.context_support_score("Hevy", "have"),
+            asr_server.CONTEXT_SUPPORT_MIN_SIMILARITY,
+        )
+        self.assertLess(
+            asr_server.context_support_score("OAuth", "the"),
+            asr_server.CONTEXT_SUPPORT_MIN_SIMILARITY,
+        )
+        self.assertFalse(asr_server.context_term_has_unprompted_support("Hevy", "have"))
+        self.assertFalse(asr_server.context_term_has_unprompted_support("OAuth", "the"))
+        # Close misspellings of the vocabulary term still canonicalize.
+        self.assertEqual(
+            asr_server.canonicalize_context_variants("heavy lifting", context),
+            "Hevy lifting",
+        )
+
+    def test_unbiased_decode_rejects_skeleton_only_context_words(self):
+        context = "Claude\nHevy\nOAuth"
+        self.assertEqual(
+            asr_server.reconcile_context_words(
+                "I Hevy OAuth thing", "I have the thing", context
+            ),
+            ("I have the thing", "context-check-fallback"),
+        )
+
+    def test_preview_canonicalization_skips_everyday_words(self):
+        self.assertEqual(
+            asr_server.canonicalize_from_preview_context(
+                "I have the thing",
+                "I Hevy the thing",
+                "Hevy\nOAuth",
+            ),
+            "I have the thing",
+        )
+
     def test_does_not_join_unrelated_words_or_short_context_terms(self):
         self.assertEqual(
             asr_server.canonicalize_context_variants(

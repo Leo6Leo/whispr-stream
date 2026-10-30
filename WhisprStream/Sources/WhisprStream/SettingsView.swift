@@ -10,6 +10,7 @@ struct SettingsView: View {
     @ObservedObject var settings: Settings
     @ObservedObject var runtime: RuntimeManager
     @ObservedObject var updates: AppUpdateManager
+    @ObservedObject var navigation: SettingsNavigation
     let onShowUpdate: () -> Void
     @State private var selectedSection: SettingsSection? = .general
 
@@ -48,6 +49,11 @@ struct SettingsView: View {
             if case .idle = updates.status {
                 updates.checkForUpdates()
             }
+        }
+        // Replays the current request on first subscription, so a window
+        // created for a particular section opens on it.
+        .onReceive(navigation.$section) { section in
+            if let section { selectedSection = section }
         }
     }
 
@@ -100,7 +106,14 @@ private struct SettingsUpdateBanner: View {
     }
 }
 
-private enum SettingsSection: String, CaseIterable, Identifiable {
+/// Lets the app open Settings on a particular section, for example the
+/// Permissions tab when a dictation cannot start without a grant.
+@MainActor
+final class SettingsNavigation: ObservableObject {
+    @Published var section: SettingsSection?
+}
+
+enum SettingsSection: String, CaseIterable, Identifiable {
     case general, model, sound, shortcuts, permissions, engine, about
 
     var id: Self { self }
@@ -249,6 +262,8 @@ private struct GeneralTab: View {
                     .font(.callout)
             }
 
+            AudioSourceSection(settings: settings)
+
             Section("Output") {
                 Toggle(isOn: $settings.autoInsert) {
                     Text("Insert at cursor")
@@ -267,15 +282,20 @@ private struct GeneralTab: View {
                          : "Remove sentence-ending punctuation from dictation.")
                 }
 
+                Toggle(isOn: $settings.removeFillerWords) {
+                    HStack(spacing: 6) {
+                        Text("Remove filler words")
+                        BetaBadge()
+                    }
+                    Text(settings.removeFillerWords
+                         ? "Drop hesitations such as um, uh, and 呃."
+                         : "Keep hesitations exactly as transcribed.")
+                }
+
                 Toggle(isOn: $settings.contextAwareCapitalization) {
                     HStack(spacing: 6) {
                         Text("Context-aware capitalization")
-                        Text("Beta")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.orange)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.orange.opacity(0.14), in: Capsule())
+                        BetaBadge()
                     }
                     Text(settings.contextAwareCapitalization
                          ? "Match nearby text. This may add a brief delay in some apps."
@@ -319,6 +339,50 @@ private struct GeneralTab: View {
 }
 
 // MARK: - Model
+
+private struct AudioSourceSection: View {
+    @ObservedObject var settings: Settings
+    @StateObject private var permissions = Permissions()
+
+    var body: some View {
+        Section {
+            Picker("Listen to", selection: $settings.audioSource) {
+                ForEach(AudioSource.allCases) { source in
+                    Text(source.label).tag(source)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            if settings.audioSource == .systemAudio {
+                LabeledContent {
+                    if permissions.screenCapture {
+                        Label("Granted", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                            .font(.callout)
+                    } else {
+                        Button("Grant Access") { permissions.requestScreenCapture() }
+                    }
+                } label: {
+                    Text("Screen & System Audio Recording")
+                    Text("macOS routes system audio through this permission. No screen image is kept.")
+                }
+                .transition(.opacity)
+            }
+        } header: {
+            Text("Audio source")
+        } footer: {
+            Text(settings.audioSource.detail + " Press ⌥S while dictating to switch sources.")
+                .foregroundStyle(.secondary)
+                .font(.callout)
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: settings.audioSource)
+        // The grant lands in System Settings, which never notifies the app;
+        // coming back to this window is the moment to re-read it.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            permissions.refresh()
+        }
+    }
+}
 
 private struct ModelTab: View {
     @ObservedObject var settings: Settings
@@ -737,6 +801,22 @@ private struct PermissionsTab: View {
                     .foregroundStyle(.secondary)
                     .font(.callout)
             }
+
+            Section {
+                PermissionRow(
+                    title: "Screen & System Audio Recording",
+                    detail: "Only needed to listen to system audio. No screen image is kept.",
+                    granted: permissions.screenCapture,
+                    actionTitle: "Grant Access",
+                    open: { permissions.requestScreenCapture() }
+                )
+            } header: {
+                Text("Optional access")
+            } footer: {
+                Text("macOS routes system audio through this permission, so WhisprStream asks for it only once System audio is the selected source. Microphone dictation never needs it.")
+                    .foregroundStyle(.secondary)
+                    .font(.callout)
+            }
         }
         .formStyle(.grouped)
         .onAppear { permissions.beginPolling() }
@@ -792,7 +872,7 @@ private struct AboutTab: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text("On-device dictation for macOS.\nHandles Chinese and English mixed in one sentence.")
+            Text("On-device dictation for macOS.\nSwitches languages mid-sentence, as you speak.")
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -937,7 +1017,7 @@ struct AboutView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text("On-device dictation for macOS.\nHandles Chinese and English mixed in one sentence.")
+            Text("On-device dictation for macOS.\nSwitches languages mid-sentence, as you speak.")
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -976,5 +1056,16 @@ struct AboutView: View {
                 .font(.system(size: 11.5, weight: .medium))
                 .frame(width: 210, alignment: .leading)
         }
+    }
+}
+
+private struct BetaBadge: View {
+    var body: some View {
+        Text("Beta")
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.orange)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.orange.opacity(0.14), in: Capsule())
     }
 }

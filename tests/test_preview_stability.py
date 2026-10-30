@@ -153,15 +153,38 @@ class PreviewStabilityTests(unittest.TestCase):
                         revised,
                     )
 
-    def test_nonlexical_and_multiple_disagreements_do_not_open_a_questionnaire(self):
-        for old, new in (("Use Codex.", "Use Codex!"),
-                         ("Use Codex and Vim", "Use Codec and Emacs"),
-                         ("先不要删除", "先删除")):
+    def held(self, old, new):
+        selector = PreviewStabilizer()
+        for i, text in enumerate((old, old, new)):
+            selector.update(text, 0, 100 + i, 0)
+        return selector.review
+
+    def test_nonlexical_and_omission_disagreements_do_not_ask(self):
+        for old, new in (("Use Codex.", "Use Codex!"), ("先不要删除", "先删除")):
             with self.subTest(old=old):
-                selector = PreviewStabilizer()
-                for i, text in enumerate((old, old, new)):
-                    selector.update(text, 0, 100 + i, 0)
-                self.assertIsNone(selector.review)
+                self.assertIsNone(self.held(old, new))
+
+    def test_several_word_disagreements_become_one_stepped_review(self):
+        review = self.held("Use Codex and Vim", "Use Codec and Emacs")
+        self.assertEqual(
+            [(c.prefix, c.preferred, c.alternative, c.suffix) for c in review.choices],
+            [("Use ", "Codex", "Codec", " and Vim"), ("Use Codex and ", "Vim", "Emacs", "")],
+        )
+        self.assertEqual(review.text, "Use Codex and Vim")
+
+    def test_too_many_disagreements_read_as_a_rewrite(self):
+        self.assertIsNone(self.held("Open Codex with Vim on Linux today",
+                                    "Open Codec with Emacs on Lennox Tuesday"))
+
+    def test_review_set_reanchors_to_any_mix_of_choices(self):
+        review = self.held("Use Codex and Vim", "Use Codec and Emacs")
+        mixed = review.for_transcript("Use Codec and Vim")
+        self.assertEqual(
+            [(c.prefix, c.preferred, c.alternative, c.suffix) for c in mixed.choices],
+            [("Use ", "Codec", "Codex", " and Vim"), ("Use Codec and ", "Vim", "Emacs", "")],
+        )
+        self.assertTrue(all(c.text == "Use Codec and Vim" for c in mixed.choices))
+        self.assertIsNone(review.for_transcript("Use Cursor and Vim"))
 
 
 if __name__ == "__main__":

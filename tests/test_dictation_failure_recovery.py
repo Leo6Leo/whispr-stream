@@ -24,6 +24,8 @@ METHODS = (
     "scheduleDismiss", "dismissNow", "startCursorContextResolution",
     "deliverPendingTranscriptIfReady", "deliverTranscript", "deliverFinalTranscript",
     "captureDictationCursorSnapshot", "resumeDictationAfterDelivery",
+    "startCapture", "stopCapture", "toggleAudioSource", "presentSystemAudioPermissionNeeded",
+    "captureUtterance", "beginCorrectionCapture",
 )
 
 
@@ -64,7 +66,7 @@ def recovery_runner(tmp_path_factory):
     "retry-failure-dismiss", "clipboard-probe-waits", "clipboard-final-waits",
     "deferred-context-snapshot", "deferred-probe-cancelled",
     "background-startup", "record-during-startup", "release-during-startup",
-    "record-during-reload",
+    "record-during-reload", "system-audio", "correction-capture",
 ])
 def test_dictation_failure_recovery(recovery_runner, scenario):
     result = subprocess.run([str(recovery_runner), scenario], capture_output=True, text=True, timeout=10)

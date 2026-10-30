@@ -9,8 +9,8 @@ cd "$(dirname "$0")"
 PROJECT_ROOT="$(cd .. && pwd)"
 PYTHON="${PYTHON:-$PROJECT_ROOT/.venv/bin/python}"
 APP="${APP:-$PROJECT_ROOT/WhisprStream.app}"
-VERSION="${VERSION:-1.0.3}"
-BUILD_NUMBER="${BUILD_NUMBER:-6}"
+VERSION="${VERSION:-1.0.5}"
+BUILD_NUMBER="${BUILD_NUMBER:-9}"
 RELEASE="${RELEASE:-0}"
 ENABLE_MEETINGS="${ENABLE_MEETINGS:-0}"
 ENABLE_OPTIONAL_MODELS="${ENABLE_OPTIONAL_MODELS:-}"
@@ -43,7 +43,7 @@ SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
 # This branch ships dictation only. Reject an experimental Meetings build
 # before compiling or replacing an existing app bundle.
 if [ "$ENABLE_MEETINGS" != "0" ]; then
-    echo "error: Meeting Notes are unavailable in 1.0.3; ENABLE_MEETINGS must be 0" >&2
+    echo "error: Meeting Notes are unavailable in 1.0.5; ENABLE_MEETINGS must be 0" >&2
     exit 1
 fi
 
@@ -70,6 +70,12 @@ if [ "$ENABLE_OPTIONAL_MODELS" = "1" ]; then
     OPTIONAL_MODELS_LABEL="enabled"
 fi
 
+# SwiftPM's default "swiftbuild" system links against the deployment target's
+# SDK (14.0) instead of the installed one, and macOS only renders Liquid Glass
+# for binaries linked against SDK 26 or later. The native system links against
+# the real SDK while still deploying to 14.0.
+SWIFT_BUILD_SYSTEM=(--build-system native)
+
 swift_build() {
     local swift_defines=()
     if [ "$ENABLE_OPTIONAL_MODELS" = "1" ]; then
@@ -86,9 +92,9 @@ swift_build() {
     fi
     # macOS Bash 3.2 rejects expanding an empty array under set -u.
     if [ "${#swift_defines[@]}" -gt 0 ]; then
-        swift build "$@" "${swift_defines[@]}"
+        swift build "${SWIFT_BUILD_SYSTEM[@]}" "$@" "${swift_defines[@]}"
     else
-        swift build "$@"
+        swift build "${SWIFT_BUILD_SYSTEM[@]}" "$@"
     fi
 }
 
@@ -159,9 +165,9 @@ if [ "$RELEASE" = "1" ]; then
     # Keep the standalone signer's established binary/Keychain access
     # requirement stable. WHISPR_RELEASE is needed only by the app target's
     # runtime-selection code.
-    swift build -c release --product WhisprStreamUpdateSigner \
+    swift build "${SWIFT_BUILD_SYSTEM[@]}" -c release --product WhisprStreamUpdateSigner \
         "${RELEASE_PATH_FLAGS[@]}"
-    swift build -c release --product WhisprStreamUpdateInstaller \
+    swift build "${SWIFT_BUILD_SYSTEM[@]}" -c release --product WhisprStreamUpdateInstaller \
         "${RELEASE_PATH_FLAGS[@]}"
     swift_build -c release --product WhisprStream \
         "${RELEASE_PATH_FLAGS[@]}"
