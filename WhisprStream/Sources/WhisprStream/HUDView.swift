@@ -187,6 +187,9 @@ struct HUDView: View {
         switch state.phase {
         case .thinking: return "Transcribing…"
         case .failed(let message): return message
+        case .listening where state.isModelWaking:
+            // Not an error: the words arrive once the model is back in memory.
+            return "Waking up the speech model…"
         default:
             return settings.audioSource == .systemAudio ? "Listening to system audio…" : "Listening…"
         }

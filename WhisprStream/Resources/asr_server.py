@@ -83,6 +83,13 @@ EMPTY_PREVIEW_MIN_NEW_AUDIO = POLL_INTERVAL
 # overlaps the wait instead of delaying the first visible word.
 PREROLL_SEC = 0.3
 
+# On a Mac deep into swap the model's weights are paged out after a few idle
+# minutes, and the pre-roll or first preview then took 2.5-4 s (field log,
+# 2026-10-28/29): the HUD said "Listening…" with no words until the key was
+# released. When the model has been busy this long before any preview, the
+# app is told so it can say the model is waking instead of looking stuck.
+WARMING_NOTICE_SEC = 1.0
+
 # A thinking pause of a few seconds in the middle of a sentence reads to the
 # model as a sentence end ("所以我要。多花几秒钟时间"). Measured on six 30-40 s
 # zh/en dictations (2026-10-14): every raw decode placed a spurious terminator
@@ -1361,6 +1368,7 @@ class Server:
         ):
             return
         started = time.perf_counter()
+        self._model_busy_since = started
         try:
             self._decode_result(
                 np.zeros(int(PREROLL_SEC * SAMPLE_RATE), dtype=np.float32),
@@ -1370,7 +1378,33 @@ class Server:
         except Exception as e:  # noqa: BLE001 - a failed pre-roll must never surface
             print(f"[asr] preroll failed: {e}", file=sys.stderr, flush=True)
             return
+        finally:
+            self._model_busy_since = None
         self._preroll_ms = int((time.perf_counter() - started) * 1000)
+
+    def _watch_warming(self, utterance: int) -> None:
+        """Tell the app while a cold model holds back the first preview."""
+        notified_at: float | None = None
+        while self.active and self._utterance_seq == utterance:
+            busy_since = getattr(self, "_model_busy_since", None)
+            pending = getattr(self, "_first_preview_pending", False)
+            now = time.perf_counter()
+            if notified_at is None:
+                if not pending:
+                    return
+                if busy_since is not None and now - busy_since >= WARMING_NOTICE_SEC:
+                    notified_at = now
+                    emit({"type": "warming"})
+                    print(
+                        "[asr] warming notice: model busy "
+                        f"{int((now - busy_since) * 1000)}ms before the first preview",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            elif busy_since is None or not pending:
+                emit({"type": "warmed"})
+                return
+            time.sleep(0.1)
 
     def _loop(self) -> None:
         last_len = 0
@@ -1440,7 +1474,11 @@ class Server:
             audio, preview_start = preview_audio(full_audio)
             try:
                 decode_started = time.perf_counter()
-                result = self._decode_preview_result(audio, context)
+                self._model_busy_since = decode_started
+                try:
+                    result = self._decode_preview_result(audio, context)
+                finally:
+                    self._model_busy_since = None
                 if result.context_verified:
                     text = self._stabilizer.update(
                         result.text, preview_start, full_len, context_revision
@@ -1590,8 +1628,12 @@ class Server:
         )
         self._preview_stop.clear()
         self.active = True
+        self._utterance_seq = getattr(self, "_utterance_seq", 0) + 1
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
+        threading.Thread(
+            target=self._watch_warming, args=(self._utterance_seq,), daemon=True
+        ).start()
 
     def audio(self, b64: str) -> None:
         pcm = np.frombuffer(base64.b64decode(b64), dtype=np.int16)

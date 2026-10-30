@@ -24,6 +24,9 @@ final class AppState: ObservableObject {
     /// A passing message shown in place of the transcript while listening,
     /// for example when ⌥S cannot switch to system audio. Clears itself.
     @Published var notice: String?
+    /// The speech model is still waking (paged back in after idle) and no
+    /// preview has arrived yet. The HUD says so instead of "Listening…".
+    @Published var isModelWaking = false
 
     var onDictationLimitReached: (() -> Void)?
 
@@ -62,6 +65,7 @@ final class AppState: ObservableObject {
         tail = ""
         level = 0
         dictationElapsedSeconds = 0
+        isModelWaking = false
         clearNotice()
     }
 

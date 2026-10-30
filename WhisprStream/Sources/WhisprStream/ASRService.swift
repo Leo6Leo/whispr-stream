@@ -10,6 +10,9 @@ final class ASRService {
     enum Event {
         case ready(ms: Int)
         case partial(committed: String, tail: String)
+        /// The model has been busy past a second before the first preview,
+        /// typically paged out after idle (true), and is now done (false).
+        case warming(Bool)
         case final(text: String, secs: Double, ms: Int, reviews: [DictationReview] = [])
         case error(String)
         case terminated(String)
@@ -107,6 +110,9 @@ final class ASRService {
             switch type {
             case "ready":
                 event = .ready(ms: obj["ms"] as? Int ?? 0)
+            case "warming", "warmed":
+                Log.write("asr \(type)")
+                event = .warming(type == "warming")
             case "partial":
                 event = .partial(
                     committed: obj["committed"] as? String ?? "",

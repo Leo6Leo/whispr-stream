@@ -8,7 +8,7 @@ enum Log { static func write(_ message: String) {} }
 
 final class ASRService {
     enum Event {
-        case ready(ms: Int), partial(committed: String, tail: String)
+        case ready(ms: Int), partial(committed: String, tail: String), warming(Bool)
         case final(text: String, secs: Double, ms: Int, reviews: [DictationReview])
         case error(String), terminated(String)
     }
@@ -67,6 +67,7 @@ final class State {
     var committed = "", tail = "", timerRunning = false
     var displayText: String { committed + tail }
     var notice: String?
+    var isModelWaking = false
     func showNotice(_ text: String, for duration: TimeInterval = 2.6) { notice = text }
     func startDictationTimer() { timerRunning = true }
     func stopDictationTimer() { timerRunning = false }

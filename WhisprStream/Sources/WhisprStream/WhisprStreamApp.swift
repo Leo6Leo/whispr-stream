@@ -809,6 +809,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case let .ready(ms):
             completeSpeechEngineStartup(ms: ms)
 
+        case let .warming(waking):
+            guard state.phase == .listening else { return }
+            state.isModelWaking = waking
+
         case let .partial(committed, tail):
             guard state.phase == .listening else { return }
             // An empty preview mid-utterance (a breath the model heard as

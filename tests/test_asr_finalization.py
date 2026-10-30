@@ -1,6 +1,8 @@
 """Preview-to-final regression tests with deterministic decoder output."""
 
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -440,6 +442,38 @@ class FinalizationTests(unittest.TestCase):
         self.assertEqual(final["mode"], "fresh-final-pause-compressed")
         self.assertEqual(server.session.calls, [{}])
         self.assertEqual(server.session.lengths, [samples(1.1)])
+
+    def test_cold_model_before_the_first_preview_is_reported_and_cleared(self):
+        server = self.make_server([])
+        server._utterance_seq = 1
+        server._first_preview_pending = True
+        server._model_busy_since = time.perf_counter() - 1.2
+        emitted = []
+        with patch.object(asr_server, "emit", emitted.append):
+            watcher = threading.Thread(target=server._watch_warming, args=(1,))
+            watcher.start()
+            time.sleep(0.3)
+            self.assertEqual(emitted, [{"type": "warming"}])
+            server._model_busy_since = None
+            watcher.join(timeout=2)
+        self.assertFalse(watcher.is_alive())
+        self.assertEqual(emitted, [{"type": "warming"}, {"type": "warmed"}])
+
+    def test_fast_model_never_reports_warming(self):
+        server = self.make_server([])
+        server._utterance_seq = 1
+        server._first_preview_pending = True
+        server._model_busy_since = time.perf_counter()
+        emitted = []
+        with patch.object(asr_server, "emit", emitted.append):
+            watcher = threading.Thread(target=server._watch_warming, args=(1,))
+            watcher.start()
+            time.sleep(0.2)
+            server._model_busy_since = None
+            server._first_preview_pending = False
+            watcher.join(timeout=2)
+        self.assertFalse(watcher.is_alive())
+        self.assertEqual(emitted, [])
 
     def test_preview_stays_idle_through_a_pause_until_speech_returns(self):
         # Three seconds of room tone are never decoded. Speech after the
