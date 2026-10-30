@@ -56,7 +56,7 @@ WhisprStream can transcribe what your Mac is playing — a video, a call, a podc
 
 ### Experimental optional models
 
-Custom Qwen3-ASR and MLX Whisper models are still under development. They are behind a compile-time feature gate and are not available in the public 1.0.4 build. Local source builds enable the experimental UI by default; use `ENABLE_OPTIONAL_MODELS=0 WhisprStream/build.sh` to reproduce the public behavior.
+Custom Qwen3-ASR and MLX Whisper models are still under development. They are behind a compile-time feature gate and are not available in the public 1.0.5 build. Local source builds enable the experimental UI by default; use `ENABLE_OPTIONAL_MODELS=0 WhisprStream/build.sh` to reproduce the public behavior.
 
 ### Interrupted downloads and repair
 
@@ -90,7 +90,7 @@ Hold the Right Option key, speak, and release; the transcript is inserted into t
 
 ## Open source and model flexibility
 
-WhisprStream is MIT licensed and designed to be inspected, adapted, and extended. The public 1.0.4 app offers the built-in Qwen3-ASR models. Experimental adapters for custom Qwen3-ASR and MLX Whisper checkpoints remain available to source-build developers behind a compile-time gate. A model does not need native streaming support: WhisprStream can repeatedly transcribe the full utterance, preserve context across language switches, and turn stable output into a live stream.
+WhisprStream is MIT licensed and designed to be inspected, adapted, and extended. The public 1.0.5 app offers the built-in Qwen3-ASR models. Experimental adapters for custom Qwen3-ASR and MLX Whisper checkpoints remain available to source-build developers behind a compile-time gate. A model does not need native streaming support: WhisprStream can repeatedly transcribe the full utterance, preserve context across language switches, and turn stable output into a live stream.
 
 The native Swift front end and Python ASR sidecar communicate locally over a small newline-delimited JSON protocol. See [HANDOFF.md](HANDOFF.md) for architecture notes and troubleshooting.
 
