@@ -89,6 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var periodicUpdateTimer: Timer?
     private var initialUpdateCheckWork: DispatchWorkItem?
     private let capture = AudioCapture()
+    private let performanceMonitor = SystemPerformanceMonitor()
     private let systemCapture = SystemAudioCapture()
     private let sourceToggleTap = SourceToggleKeyTap()
     private var hotkey: HotKeyMonitor!
@@ -142,6 +143,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UpdateRelaunch.performIfNeeded(launchedByUpdater: launchedByUpdater, parentProcess: parentProcess)
         mergeCrossBuildContentIfNeeded()
         panel = HUDPanel(state: state)
+        performanceMonitor.onChange = { [weak self] condition in
+            guard let self else { return }
+            self.state.updatePerformanceCondition(condition)
+            Log.write("system performance condition: \(condition.logValue)")
+        }
+        performanceMonitor.start()
         state.onDictationLimitReached = { [weak self] in
             guard let self else { return }
             self.hotkey.cancelActiveDictation()
@@ -794,7 +801,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         stopCapture()
         state.stopDictationTimer()
         state.level = 0
-        state.phase = .thinking
+        state.beginTranscriptionWait()
         if settings.autoInsert,
            settings.contextAwareCapitalization,
            !hasResolvedPrecedingText,
@@ -828,10 +835,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         case let .final(text, secs, ms, reviews):
             guard state.phase == .thinking, reviewPanel == nil else { return }
+            state.finishTranscriptionWait()
             precedingTextAtDictationStart = nil
             captureUtterance(rawTranscript: text)
             state.lastAudioSecs = secs
             state.lastDurationMS = ms
+            if state.performanceCondition != .normal {
+                Log.write(
+                    "asr performance context: condition=\(state.performanceCondition.logValue) "
+                        + "audio=\(String(format: "%.2f", secs))s inference=\(ms)ms"
+                )
+            }
             guard !text.isEmpty else {
                 cancelCursorContextResolution()
                 dismissNow()
@@ -854,6 +868,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func failSpeechEngine(_ message: String) {
+        state.finishTranscriptionWait()
         // Stop hardware before leaving .listening: key release and the safety
         // timer can no longer own cleanup once the UI has entered .failed.
         stopCapture()

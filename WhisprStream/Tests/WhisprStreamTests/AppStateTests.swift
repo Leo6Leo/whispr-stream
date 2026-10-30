@@ -43,4 +43,62 @@ final class AppStateTests: XCTestCase {
         state.reset()
         XCTAssertNil(state.notice)
     }
+
+    func testPerformanceNoticeAppearsOnlyAfterSlowWait() async throws {
+        let state = AppState()
+        state.updatePerformanceCondition(.memoryPressure)
+
+        state.beginTranscriptionWait(noticeDelay: 0.01)
+
+        XCTAssertNil(state.performanceNoticeText)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(
+            state.performanceNoticeText,
+            "Memory pressure is high · Transcription may be slower"
+        )
+    }
+
+    func testReturningToNormalHidesPerformanceNotice() async throws {
+        let state = AppState()
+        state.updatePerformanceCondition(.thermalPressure)
+        state.beginTranscriptionWait(noticeDelay: 0.01)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertNotNil(state.performanceNoticeText)
+
+        state.updatePerformanceCondition(.normal)
+
+        XCTAssertNil(state.performanceNoticeText)
+    }
+
+    func testFairThermalStateDoesNotWarn() {
+        XCTAssertEqual(
+            SystemPerformanceCondition(memoryPressure: false, thermalState: .fair),
+            .normal
+        )
+        XCTAssertEqual(
+            SystemPerformanceCondition(memoryPressure: false, thermalState: .serious),
+            .thermalPressure
+        )
+        XCTAssertEqual(
+            SystemPerformanceCondition(memoryPressure: true, thermalState: .critical),
+            .memoryAndThermalPressure
+        )
+    }
+
+    func testNormalPressureNeverWarns() async throws {
+        let state = AppState()
+        state.beginTranscriptionWait(noticeDelay: 0.01)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertNil(state.performanceNoticeText)
+    }
+
+    func testResetHidesPerformanceNotice() async throws {
+        let state = AppState()
+        state.updatePerformanceCondition(.memoryPressure)
+        state.beginTranscriptionWait(noticeDelay: 0.01)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertNotNil(state.performanceNoticeText)
+        state.reset()
+        XCTAssertNil(state.performanceNoticeText)
+    }
 }

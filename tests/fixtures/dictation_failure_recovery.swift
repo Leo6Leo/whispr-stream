@@ -1,5 +1,9 @@
 // I/O doubles only. The Python runner inserts current production methods below.
 enum Phase: Equatable { case idle, listening, thinking, inserted, failed(String) }
+enum SystemPerformanceCondition: Equatable {
+    case normal, memoryPressure
+    var logValue: String { "\(self)" }
+}
 struct DictationReview: Equatable {
     var recommendedText = "", alternativeText = ""
 }
@@ -68,6 +72,10 @@ final class State {
     var displayText: String { committed + tail }
     var notice: String?
     var isModelWaking = false
+    var performanceCondition = SystemPerformanceCondition.normal
+    func beginTranscriptionWait() { phase = .thinking }
+    func finishTranscriptionWait() {}
+    func updatePerformanceCondition(_ condition: SystemPerformanceCondition) { performanceCondition = condition }
     func showNotice(_ text: String, for duration: TimeInterval = 2.6) { notice = text }
     func startDictationTimer() { timerRunning = true }
     func stopDictationTimer() { timerRunning = false }

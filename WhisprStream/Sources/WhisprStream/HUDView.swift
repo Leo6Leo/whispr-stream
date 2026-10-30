@@ -58,7 +58,7 @@ struct HUDView: View {
                 .fill(.ultraThinMaterial)
                 .overlay {
                     RoundedRectangle(cornerRadius: surfaceCornerRadius, style: .continuous)
-                        .fill(Color.orange.opacity(state.isApproachingDictationLimit ? 0.18 : 0))
+                        .fill(Color.orange.opacity(orangeHighlightOpacity))
                 }
                 .overlay { border }
         }
@@ -88,6 +88,7 @@ struct HUDView: View {
         .animation(.spring(response: 0.26, dampingFraction: 0.72), value: state.phase)
         .animation(.easeInOut(duration: 0.2), value: state.isApproachingDictationLimit)
         .animation(.easeInOut(duration: 0.2), value: state.notice)
+        .animation(.easeInOut(duration: 0.2), value: showsPerformanceNotice)
         .animation(.spring(response: 0.35, dampingFraction: 0.9), value: settings.audioSource)
         .onAppear { history = Array(repeating: 0, count: barCount) }
         .onChange(of: state.level) { _, new in
@@ -96,6 +97,13 @@ struct HUDView: View {
             next.append(new)
             history = next
         }
+    }
+
+    private var showsPerformanceNotice: Bool { state.performanceNoticeText != nil }
+
+    private var orangeHighlightOpacity: Double {
+        if state.isApproachingDictationLimit { return 0.18 }
+        return showsPerformanceNotice ? 0.13 : 0
     }
 
     private var hudContent: some View {
@@ -115,9 +123,10 @@ struct HUDView: View {
     private var border: some View {
         let shape = RoundedRectangle(cornerRadius: surfaceCornerRadius, style: .continuous)
         let atLimit = state.isApproachingDictationLimit
+        let warns = atLimit || showsPerformanceNotice
         return ZStack {
             shape.strokeBorder(Color.primary.opacity(0.07), lineWidth: 0.5)
-                .opacity(atLimit || isRainbow ? 0 : 1)
+                .opacity(warns || isRainbow ? 0 : 1)
             TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !isAnimatingRainbow)) { context in
                 let phase = RainbowPalette.phase(at: context.date)
                 shape.strokeBorder(
@@ -131,9 +140,10 @@ struct HUDView: View {
                     lineWidth: 1
                 )
             }
-            .opacity(isRainbow && !atLimit ? (colorScheme == .dark ? 0.55 : 0.45) : 0)
+            .opacity(isRainbow && !warns ? (colorScheme == .dark ? 0.55 : 0.45) : 0)
             shape.strokeBorder(Color.orange.opacity(0.72), lineWidth: 1.2)
-                .opacity(atLimit ? 1 : 0)
+                // The pressure notice is a softer ring than the hard limit.
+                .opacity(atLimit ? 1 : showsPerformanceNotice ? 0.8 : 0)
         }
     }
 
@@ -157,7 +167,16 @@ struct HUDView: View {
 
     @ViewBuilder
     private var labelText: some View {
-        if let notice = state.notice {
+        if let performanceNotice = state.performanceNoticeText {
+            // The final is taking longer while macOS reports memory or thermal
+            // pressure. Orange like the limit warning, and it clears itself.
+            Text(performanceNotice)
+                .font(.system(size: 15, weight: .medium, design: .rounded))
+                .foregroundStyle(.orange)
+                .lineLimit(1)
+                .transition(.opacity)
+                .accessibilityLabel(performanceNotice)
+        } else if let notice = state.notice {
             // A passing message while still listening, for example when ⌥S
             // cannot switch sources. Orange like the limit warning: something
             // needs the user, but nothing was lost.
