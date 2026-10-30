@@ -122,6 +122,24 @@ final class FillerWordNormalizerTests: XCTestCase {
         assertNormalized("所以。呃，我们先发布。", "所以我们先发布。")
     }
 
+    func testRejoinsAtACommaAndAfterAnAttachedHesitation() {
+        // Field results from the same test: a comma instead of a period, and
+        // 嗯 written straight after the connective.
+        assertNormalized("I like the ability to, um, export it as PDF.",
+                         "I like the ability to export it as PDF.")
+        assertNormalized("我觉得因为嗯，这个比较好。", "我觉得因为这个比较好。")
+        assertNormalized("我觉得因为，嗯，这个比较好。", "我觉得因为这个比较好。")
+        // Attached to other words, 啊 and 嗯 stay particles.
+        assertNormalized("好啊，嗯，可以", "好啊，可以")
+    }
+
+    func testHmmIsAHesitation() {
+        assertNormalized("Hmm, interesting.", "Interesting.")
+        // The engine capitalized the next word, so the speaker's break stands.
+        assertNormalized("I would love to. Hmm. Anyway, ability to create, um, a personal wiki.",
+                         "I would love to. Anyway, ability to create, a personal wiki.")
+    }
+
     func testKeepsSentenceBreaksThatCanStand() {
         // The word before the period can end a sentence, or the period is
         // part of an abbreviation, so the break is the speaker's.

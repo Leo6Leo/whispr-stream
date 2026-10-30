@@ -11,10 +11,13 @@ import Foundation
 /// or next to an unambiguous hesitation. Context-dependent words such as `那个` or `like`
 /// are never touched.
 ///
-/// A hesitation mid-sentence often makes the engine end the sentence just
-/// before it: `ability to. Um, export it`. When the word before that period
-/// cannot end a sentence (`to`, `the`, `因为`), the period goes with the
-/// hesitation and the sentence is joined again: `ability to export it`.
+/// A hesitation mid-sentence often makes the engine break the sentence just
+/// before it: `ability to. Um, export it` or `ability to, um, export it`.
+/// When the word before that period or comma leaves the sentence open (`the`,
+/// `to`, `因为`), the break goes with the hesitation: `ability to export it`.
+/// For words that sometimes do end a sentence (`I'd love to.`), the engine's
+/// own casing decides: a lowercase word after the hesitation means it heard
+/// one sentence continuing.
 enum FillerWordNormalizer {
     private enum Tier {
         case always
@@ -36,6 +39,7 @@ enum FillerWordNormalizer {
     private static let latinFillers: [String: Tier] = [
         "um": .always, "umm": .always, "uh": .always, "uhh": .always,
         "uhm": .always, "erm": .always,
+        "hm": .always, "hmm": .always, "hmmm": .always,
         "ah": .isolated
     ]
 
@@ -50,15 +54,23 @@ enum FillerWordNormalizer {
         ".", "!", "?", "…", "。", "！", "？"
     ]
 
-    /// English words that never end a sentence. `for`, `with`, `that` and
+    /// English words a sentence cannot end on. `for`, `with`, `that` and
     /// similar can (`what for.`), so they are left out on purpose.
-    private static let latinDanglingWords: Set<String> = [
-        "a", "an", "the", "to", "of", "into", "and", "or", "but", "because",
-        "if", "than", "whether", "my", "your", "our", "their", "its"
+    private static let latinDeterminers: Set<String> = [
+        "a", "an", "the", "my", "your", "our", "their", "its"
+    ]
+
+    /// English words that rarely end a sentence but can (`I'd love to.`).
+    /// A break after them is only undone when the engine continued in
+    /// lowercase.
+    private static let latinOpenWords: Set<String> = [
+        "to", "of", "into", "and", "or", "but", "because", "if", "than", "whether"
     ]
 
     /// Chinese connectives that leave a sentence open. `的`, `对` and `在`
-    /// can end one (`这是我的。`), so they are left out on purpose.
+    /// can end one (`这是我的。`), so they are left out on purpose. A
+    /// hesitation written straight after one (`因为嗯，`) is a filler, not a
+    /// particle.
     private static let cjkDanglingWords = [
         "和", "跟", "把", "被", "从", "因为", "所以", "但是", "如果", "然后",
         "或者", "而且", "以及", "比如", "关于", "为了"
@@ -140,9 +152,11 @@ enum FillerWordNormalizer {
             // 呃逆 is a hiccup, not a hesitation.
             if range.upperBound < text.endIndex, text[range.upperBound] == "逆" { return nil }
         case .isolated:
-            // Attached to a word, these are particles (好啊) or repeats (嗯嗯).
+            // Attached to a word, these are particles (好啊) or repeats (嗯嗯),
+            // except straight after a connective that leaves the sentence open.
             if range.lowerBound > text.startIndex,
-               text[text.index(before: range.lowerBound)].isLetter { return nil }
+               text[text.index(before: range.lowerBound)].isLetter,
+               !followsOpenConnective(range.lowerBound, in: text) { return nil }
             if range.upperBound < text.endIndex, text[range.upperBound].isLetter { return nil }
         }
         return Token(range: range, tier: tier, isCapitalized: false)
@@ -171,7 +185,7 @@ enum FillerWordNormalizer {
         let previous = previousNonWhitespace(before: first.range.lowerBound, in: text)
         let following = nextNonWhitespace(from: last.range.upperBound, in: text)
         let atSentenceStart = previous.map { sentenceTerminators.contains(text[$0]) } ?? true
-        let rejoinsSentence = previous.map { endsMidSentence(at: $0, in: text) } ?? false
+        let breakBefore = previous.map { openBreak(at: $0, in: text) } ?? .stands
 
         // The run takes its own trailing commas and spaces with it:
         // `sure, um, which` -> `sure, which`.
@@ -203,7 +217,14 @@ enum FillerWordNormalizer {
         }
         // `ability to. Um, export` -> `ability to export`: the period was the
         // hesitation's, not the sentence's.
-        if rejoinsSentence, let previous, end < text.endIndex {
+        let rejoinsSentence: Bool
+        switch breakBefore {
+        case .stands: rejoinsSentence = false
+        case .open: rejoinsSentence = end < text.endIndex
+        case .openIfContinued:
+            rejoinsSentence = end < text.endIndex && text[end].isASCII && text[end].isLowercase
+        }
+        if rejoinsSentence, let previous {
             start = previous
         }
 
@@ -214,22 +235,34 @@ enum FillerWordNormalizer {
         )
     }
 
-    /// Whether the period at `index` closes a sentence that cannot end there.
-    private static func endsMidSentence(at index: String.Index, in text: String) -> Bool {
+    private enum Break {
+        case stands, open, openIfContinued
+    }
+
+    /// Whether the period or comma at `index` breaks a sentence that is
+    /// still open there.
+    private static func openBreak(at index: String.Index, in text: String) -> Break {
         let before = text[..<index]
         switch text[index] {
-        case ".":
+        case ".", ",":
             let word = before.reversed().prefix(while: isASCIILetter)
-            guard !word.isEmpty else { return false }
+            guard !word.isEmpty else { return .stands }
             let start = before.index(before.endIndex, offsetBy: -word.count)
             // `U.S. Um` or `e.g. um` is an abbreviation, not a sentence.
-            if start > before.startIndex, before[before.index(before: start)] == "." { return false }
-            return latinDanglingWords.contains(String(word.reversed()).lowercased())
-        case "。":
-            return cjkDanglingWords.contains { before.hasSuffix($0) }
+            if start > before.startIndex, before[before.index(before: start)] == "." { return .stands }
+            let lowered = String(word.reversed()).lowercased()
+            if latinDeterminers.contains(lowered) { return .open }
+            return latinOpenWords.contains(lowered) ? .openIfContinued : .stands
+        case "。", "，":
+            return cjkDanglingWords.contains { before.hasSuffix($0) } ? .open : .stands
         default:
-            return false
+            return .stands
         }
+    }
+
+    private static func followsOpenConnective(_ index: String.Index, in text: String) -> Bool {
+        let before = text[..<index]
+        return cjkDanglingWords.contains { before.hasSuffix($0) }
     }
 
     /// Ambiguous words are hesitations when they open a sentence, repeat
@@ -244,6 +277,7 @@ enum FillerWordNormalizer {
         in text: String
     ) -> Bool {
         if run.contains(where: { $0.tier == .always }) { return true }
+        if followsOpenConnective(run[0].range.lowerBound, in: text) { return true }
         if atSentenceStart {
             return !run.contains { opensReply($0, nextWordAt: next, in: text) }
         }
