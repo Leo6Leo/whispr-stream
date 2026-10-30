@@ -10,6 +10,11 @@ import Foundation
 /// (unless a reply such as `好的` follows), repeating, sitting between commas,
 /// or next to an unambiguous hesitation. Context-dependent words such as `那个` or `like`
 /// are never touched.
+///
+/// A hesitation mid-sentence often makes the engine end the sentence just
+/// before it: `ability to. Um, export it`. When the word before that period
+/// cannot end a sentence (`to`, `the`, `因为`), the period goes with the
+/// hesitation and the sentence is joined again: `ability to export it`.
 enum FillerWordNormalizer {
     private enum Tier {
         case always
@@ -43,6 +48,20 @@ enum FillerWordNormalizer {
 
     private static let sentenceTerminators: Set<Character> = [
         ".", "!", "?", "…", "。", "！", "？"
+    ]
+
+    /// English words that never end a sentence. `for`, `with`, `that` and
+    /// similar can (`what for.`), so they are left out on purpose.
+    private static let latinDanglingWords: Set<String> = [
+        "a", "an", "the", "to", "of", "into", "and", "or", "but", "because",
+        "if", "than", "whether", "my", "your", "our", "their", "its"
+    ]
+
+    /// Chinese connectives that leave a sentence open. `的`, `对` and `在`
+    /// can end one (`这是我的。`), so they are left out on purpose.
+    private static let cjkDanglingWords = [
+        "和", "跟", "把", "被", "从", "因为", "所以", "但是", "如果", "然后",
+        "或者", "而且", "以及", "比如", "关于", "为了"
     ]
 
     static func normalize(_ text: String) -> String {
@@ -152,6 +171,7 @@ enum FillerWordNormalizer {
         let previous = previousNonWhitespace(before: first.range.lowerBound, in: text)
         let following = nextNonWhitespace(from: last.range.upperBound, in: text)
         let atSentenceStart = previous.map { sentenceTerminators.contains(text[$0]) } ?? true
+        let rejoinsSentence = previous.map { endsMidSentence(at: $0, in: text) } ?? false
 
         // The run takes its own trailing commas and spaces with it:
         // `sure, um, which` -> `sure, which`.
@@ -181,12 +201,35 @@ enum FillerWordNormalizer {
                 }
             }
         }
+        // `ability to. Um, export` -> `ability to export`: the period was the
+        // hesitation's, not the sentence's.
+        if rejoinsSentence, let previous, end < text.endIndex {
+            start = previous
+        }
 
         return Removal(
             range: start..<end,
             joiner: joiner(between: start, and: end, removing: text[start..<end], in: text),
-            capitalizesNextWord: atSentenceStart && first.isCapitalized
+            capitalizesNextWord: atSentenceStart && !rejoinsSentence && first.isCapitalized
         )
+    }
+
+    /// Whether the period at `index` closes a sentence that cannot end there.
+    private static func endsMidSentence(at index: String.Index, in text: String) -> Bool {
+        let before = text[..<index]
+        switch text[index] {
+        case ".":
+            let word = before.reversed().prefix(while: isASCIILetter)
+            guard !word.isEmpty else { return false }
+            let start = before.index(before.endIndex, offsetBy: -word.count)
+            // `U.S. Um` or `e.g. um` is an abbreviation, not a sentence.
+            if start > before.startIndex, before[before.index(before: start)] == "." { return false }
+            return latinDanglingWords.contains(String(word.reversed()).lowercased())
+        case "。":
+            return cjkDanglingWords.contains { before.hasSuffix($0) }
+        default:
+            return false
+        }
     }
 
     /// Ambiguous words are hesitations when they open a sentence, repeat

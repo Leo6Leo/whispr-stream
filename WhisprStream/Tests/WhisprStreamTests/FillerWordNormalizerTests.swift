@@ -112,6 +112,29 @@ final class FillerWordNormalizerTests: XCTestCase {
         assertNormalized("呃，", "")
     }
 
+    func testRejoinsASentenceSplitAtAHesitation() {
+        // Field report: a pause filled with "um" ended the sentence after "to".
+        assertNormalized("I want an ability to. Um, export it as PDF.",
+                         "I want an ability to export it as PDF.")
+        assertNormalized("I want to. Um, um, export it.", "I want to export it.")
+        assertNormalized("Use the. Um, Claude app.", "Use the Claude app.")
+        assertNormalized("我觉得因为。嗯，这个比较好。", "我觉得因为这个比较好。")
+        assertNormalized("所以。呃，我们先发布。", "所以我们先发布。")
+    }
+
+    func testKeepsSentenceBreaksThatCanStand() {
+        // The word before the period can end a sentence, or the period is
+        // part of an abbreviation, so the break is the speaker's.
+        assertNormalized("That's done. Um, next I want to ship it.",
+                         "That's done. Next I want to ship it.")
+        assertNormalized("这是我的。嗯，你的呢？", "这是我的。你的呢？")
+        assertNormalized("Is it ready to? Um, maybe.", "Is it ready to? Maybe.")
+        assertNormalized("Check the U.S. Um, rules.", "Check the U.S. Rules.")
+        assertNormalized("e.g. Um, this one.", "e.g. This one.")
+        // Nothing follows the hesitation, so there is nothing to rejoin.
+        assertNormalized("Push it to. Um.", "Push it to. ")
+    }
+
     func testLeavesTextWithoutFillersUnchanged() {
         let text = "你帮我检查一下，这个软件没有什么漏洞吧？就他有没有Backdoor。"
         assertNormalized(text, text)
