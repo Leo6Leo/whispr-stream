@@ -129,8 +129,13 @@ final class FillerWordNormalizerTests: XCTestCase {
                          "I like the ability to export it as PDF.")
         assertNormalized("我觉得因为嗯，这个比较好。", "我觉得因为这个比较好。")
         assertNormalized("我觉得因为，嗯，这个比较好。", "我觉得因为这个比较好。")
-        // Attached to other words, 啊 and 嗯 stay particles.
+        // Attached to other words, 啊 and 嗯 stay particles, including words
+        // that merely end in a character that is also a connective.
         assertNormalized("好啊，嗯，可以", "好啊，可以")
+        assertNormalized("今天好暖和啊，我们出去走走。", "今天好暖和啊，我们出去走走。")
+        assertNormalized("他这人挺随和啊。", "他这人挺随和啊。")
+        // Back-to-back hesitations after a rejoin keep the sentence going.
+        assertNormalized("I opened the. Um. Uh, export dialog.", "I opened the export dialog.")
     }
 
     func testHmmIsAHesitation() {
@@ -149,6 +154,10 @@ final class FillerWordNormalizerTests: XCTestCase {
         assertNormalized("Is it ready to? Um, maybe.", "Is it ready to? Maybe.")
         assertNormalized("Check the U.S. Um, rules.", "Check the U.S. Rules.")
         assertNormalized("e.g. Um, this one.", "e.g. This one.")
+        // A capital A is a name, not the article.
+        assertNormalized("We'll go with option A. Um, the other one is too slow.",
+                         "We'll go with option A. The other one is too slow.")
+        assertNormalized("Vitamin A. Um, and also zinc.", "Vitamin A. And also zinc.")
         // Nothing follows the hesitation, so there is nothing to rejoin.
         assertNormalized("Push it to. Um.", "Push it to. ")
     }

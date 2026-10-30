@@ -34,6 +34,7 @@ enum FillerWordNormalizer {
         let range: Range<String.Index>
         let joiner: String
         let capitalizesNextWord: Bool
+        let rejoinsSentence: Bool
     }
 
     private static let latinFillers: [String: Tier] = [
@@ -54,8 +55,9 @@ enum FillerWordNormalizer {
         ".", "!", "?", "…", "。", "！", "？"
     ]
 
-    /// English words a sentence cannot end on. `for`, `with`, `that` and
-    /// similar can (`what for.`), so they are left out on purpose.
+    /// English words a sentence cannot end on, as written in lowercase: a
+    /// capital `A` is a name (`option A.`, `vitamin A.`). `for`, `with`,
+    /// `that` and similar can end one (`what for.`), so they are left out.
     private static let latinDeterminers: Set<String> = [
         "a", "an", "the", "my", "your", "our", "their", "its"
     ]
@@ -68,12 +70,13 @@ enum FillerWordNormalizer {
     ]
 
     /// Chinese connectives that leave a sentence open. `的`, `对` and `在`
-    /// can end one (`这是我的。`), so they are left out on purpose. A
+    /// can end one (`这是我的。`), so they are left out on purpose, and so are
+    /// single characters such as `和`, which also end words (`暖和啊`). A
     /// hesitation written straight after one (`因为嗯，`) is a filler, not a
     /// particle.
     private static let cjkDanglingWords = [
-        "和", "跟", "把", "被", "从", "因为", "所以", "但是", "如果", "然后",
-        "或者", "而且", "以及", "比如", "关于", "为了"
+        "因为", "所以", "但是", "如果", "然后", "或者", "而且", "以及",
+        "比如", "关于", "为了"
     ]
 
     static func normalize(_ text: String) -> String {
@@ -86,11 +89,16 @@ enum FillerWordNormalizer {
         var result = ""
         var cursor = text.startIndex
         var capitalizeNext = false
+        var rejoined = false
         for removal in removals where removal.range.lowerBound >= cursor {
+            // `the. Um. Uh, export`: once the first hesitation rejoined the
+            // sentence, the one right after it does not open a new one.
+            let continuesRejoin = rejoined && removal.range.lowerBound == cursor
             appendSegment(text[cursor..<removal.range.lowerBound], to: &result, capitalizing: capitalizeNext)
             result += removal.joiner
             cursor = removal.range.upperBound
-            capitalizeNext = removal.capitalizesNextWord
+            capitalizeNext = removal.capitalizesNextWord && !continuesRejoin
+            rejoined = removal.rejoinsSentence || continuesRejoin
         }
         appendSegment(text[cursor...], to: &result, capitalizing: capitalizeNext)
 
@@ -231,7 +239,8 @@ enum FillerWordNormalizer {
         return Removal(
             range: start..<end,
             joiner: joiner(between: start, and: end, removing: text[start..<end], in: text),
-            capitalizesNextWord: atSentenceStart && !rejoinsSentence && first.isCapitalized
+            capitalizesNextWord: atSentenceStart && !rejoinsSentence && first.isCapitalized,
+            rejoinsSentence: rejoinsSentence
         )
     }
 
@@ -250,8 +259,9 @@ enum FillerWordNormalizer {
             let start = before.index(before.endIndex, offsetBy: -word.count)
             // `U.S. Um` or `e.g. um` is an abbreviation, not a sentence.
             if start > before.startIndex, before[before.index(before: start)] == "." { return .stands }
-            let lowered = String(word.reversed()).lowercased()
-            if latinDeterminers.contains(lowered) { return .open }
+            let written = String(word.reversed())
+            let lowered = written.lowercased()
+            if written == lowered, latinDeterminers.contains(lowered) { return .open }
             return latinOpenWords.contains(lowered) ? .openIfContinued : .stands
         case "。", "，":
             return cjkDanglingWords.contains { before.hasSuffix($0) } ? .open : .stands

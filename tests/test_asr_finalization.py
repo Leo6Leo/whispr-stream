@@ -455,9 +455,19 @@ class FinalizationTests(unittest.TestCase):
             time.sleep(0.3)
             self.assertEqual(emitted, [{"type": "warming"}])
             server._model_busy_since = None
+            time.sleep(0.3)
+            self.assertEqual(emitted, [{"type": "warming"}, {"type": "warmed"}])
+            # A slow first preview right after the slow pre-roll warns again.
+            server._model_busy_since = time.perf_counter() - 1.2
+            time.sleep(0.3)
+            server._model_busy_since = None
+            server._first_preview_pending = False
             watcher.join(timeout=2)
         self.assertFalse(watcher.is_alive())
-        self.assertEqual(emitted, [{"type": "warming"}, {"type": "warmed"}])
+        self.assertEqual(
+            emitted,
+            [{"type": "warming"}, {"type": "warmed"}, {"type": "warming"}, {"type": "warmed"}],
+        )
 
     def test_fast_model_never_reports_warming(self):
         server = self.make_server([])

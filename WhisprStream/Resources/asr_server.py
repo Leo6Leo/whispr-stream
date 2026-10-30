@@ -1383,7 +1383,7 @@ class Server:
         self._preroll_ms = int((time.perf_counter() - started) * 1000)
 
     def _watch_warming(self, utterance: int) -> None:
-        """Tell the app while a cold model holds back the first preview."""
+        """Tell the app whenever a cold model holds back the first preview."""
         notified_at: float | None = None
         while self.active and self._utterance_seq == utterance:
             busy_since = getattr(self, "_model_busy_since", None)
@@ -1403,7 +1403,11 @@ class Server:
                     )
             elif busy_since is None or not pending:
                 emit({"type": "warmed"})
-                return
+                if not pending:
+                    return
+                # A cold pre-roll can be followed by a cold first preview;
+                # keep watching until the first words are on screen.
+                notified_at = None
             time.sleep(0.1)
 
     def _loop(self) -> None:
