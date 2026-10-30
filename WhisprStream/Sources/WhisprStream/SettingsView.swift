@@ -872,7 +872,7 @@ private struct AboutTab: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text("On-device dictation for macOS.\nHandles Chinese and English mixed in one sentence.")
+            Text("On-device dictation for macOS.\nSwitches languages mid-sentence, as you speak.")
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -1017,7 +1017,7 @@ struct AboutView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text("On-device dictation for macOS.\nHandles Chinese and English mixed in one sentence.")
+            Text("On-device dictation for macOS.\nSwitches languages mid-sentence, as you speak.")
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
