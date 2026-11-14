@@ -306,6 +306,19 @@ private struct GeneralTab: View {
             CorrectionSettingsSection(settings: settings)
 
             Section {
+                Toggle(isOn: $settings.launchAtLogin) {
+                    Text("Launch at login")
+                    Text("Start WhisprStream automatically when you log in.")
+                }
+            } header: {
+                Text("Startup")
+            } footer: {
+                Text("You can also change this in System Settings › General › Login Items.")
+                    .foregroundStyle(.secondary)
+                    .font(.callout)
+            }
+
+            Section {
                 LabeledContent("Language") {
                     Text("Automatic")
                         .foregroundStyle(.secondary)

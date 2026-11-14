@@ -51,6 +51,14 @@ final class VoiceShortcutSettingsTests: XCTestCase {
         XCTAssertTrue(Settings(defaults: makeDefaults()).playSound)
     }
 
+    func testLaunchAtLoginDefaultsOffAndPersists() {
+        let defaults = makeDefaults()
+        let settings = Settings(defaults: defaults)
+        XCTAssertFalse(settings.launchAtLogin)
+        settings.launchAtLogin = true
+        XCTAssertTrue(Settings(defaults: defaults).launchAtLogin)
+    }
+
     func testOneWordDictationOffersAutomaticAndEveryQwenLanguage() {
         let fixedLanguages = ShortUtteranceLanguage.allCases.compactMap(\.fixedModelLanguage)
 
