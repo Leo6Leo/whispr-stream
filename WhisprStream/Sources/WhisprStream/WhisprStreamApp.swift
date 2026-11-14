@@ -86,6 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var statusUpdateDot: StatusUpdateDotView?
     private var updateStatusObservation: AnyCancellable?
+    private var launchReadinessObservation: AnyCancellable?
     private var periodicUpdateTimer: Timer?
     private var initialUpdateCheckWork: DispatchWorkItem?
     private let capture = AudioCapture()
@@ -186,20 +187,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
 
-        if runtime.isReady, ModelCatalog.state(for: settings.model).isInstalled {
-            if settings.hasCompletedOnboarding {
-                queueFirstDictationCoachIfNeeded()
-            }
-            startSpeechEngine()
-            if settings.hasCompletedOnboarding {
-                // Onboarding requests these itself; only prompt directly when skipped.
-                AVCaptureDevice.requestAccess(for: .audio) { [weak self] _ in
-                    Task { @MainActor in self?.presentFirstDictationCoachIfReady() }
+        if !settings.hasCompletedOnboarding {
+            // The guide handles engine install, model download, and permissions
+            // itself, and starts the engine through its callback.
+            showOnboarding()
+        } else if runtime.isReady, ModelCatalog.state(for: settings.model).isInstalled {
+            beginOnboardedSession()
+        } else if runtime.phase == .checking {
+            // RuntimeManager.init started an async health check; isReady stays
+            // false until it finishes, so deciding now would reopen the setup
+            // guide on every launch. Decide once the check settles.
+            launchReadinessObservation = runtime.$phase
+                .removeDuplicates()
+                .sink { [weak self] phase in
+                    guard let self, phase != .checking else { return }
+                    self.launchReadinessObservation = nil
+                    // @Published emits from willSet; re-read state after commit.
+                    DispatchQueue.main.async { self.resumeLaunchAfterRuntimeCheck() }
                 }
-                if !trusted { HotKeyMonitor.ensureAccessibility() }
-            } else {
-                showOnboarding()
-            }
         } else {
             presentSetup()
         }
@@ -240,6 +245,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         initialUpdateCheckWork?.cancel()
         periodicUpdateTimer?.invalidate()
         updateStatusObservation?.cancel()
+        launchReadinessObservation?.cancel()
         stopCapture()
         state.stopDictationTimer()
         hotkey?.stop()
@@ -251,6 +257,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func presentSetup() {
         showOnboarding()
+    }
+
+    /// The post-onboarding launch path: warm the engine and prompt for the
+    /// permissions onboarding would otherwise request itself.
+    private func beginOnboardedSession() {
+        queueFirstDictationCoachIfNeeded()
+        startSpeechEngine()
+        AVCaptureDevice.requestAccess(for: .audio) { [weak self] _ in
+            Task { @MainActor in self?.presentFirstDictationCoachIfReady() }
+        }
+        if !AXIsProcessTrusted() { HotKeyMonitor.ensureAccessibility() }
+    }
+
+    private func resumeLaunchAfterRuntimeCheck() {
+        if runtime.isReady, ModelCatalog.state(for: settings.model).isInstalled {
+            beginOnboardedSession()
+        } else {
+            presentSetup()
+        }
     }
 
     private func showOnboarding() {
