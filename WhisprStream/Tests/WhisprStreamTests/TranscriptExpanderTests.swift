@@ -144,11 +144,48 @@ final class TranscriptExpanderTests: XCTestCase {
         XCTAssertEqual(SpokenNumberNormalizer.normalize("負二點五"), "-2.5")
     }
 
+    func testChineseNumbersWithADroppedTrailingUnit() {
+        // Field reports: these became 2005 and 102.
+        XCTAssertEqual(SpokenNumberNormalizer.normalize("金牌就提高到两千五吧。"), "金牌就提高到2500吧。")
+        XCTAssertEqual(SpokenNumberNormalizer.normalize("二十除以一百二。"), "20除以120。")
+        XCTAssertEqual(SpokenNumberNormalizer.normalize("三万五"), "35000")
+        XCTAssertEqual(SpokenNumberNormalizer.normalize("一亿五"), "150000000")
+        XCTAssertEqual(SpokenNumberNormalizer.normalize("一万二千五"), "12500")
+        XCTAssertEqual(SpokenNumberNormalizer.normalize("一百二个"), "120个")
+        // With the unit spoken, after 零, or after 十, the digit is ones.
+        for (text, expected) in [("二十五", "25"), ("一百零二", "102"), ("两千零五", "2005"),
+                                 ("一百二十", "120"), ("两千五百", "2500"), ("一百二十三", "123"),
+                                 ("一百二十个", "120个"), ("一万零五", "10005")] {
+            XCTAssertEqual(SpokenNumberNormalizer.normalize(text), expected, text)
+        }
+    }
+
     func testChineseNormalizerPreservesAmbiguousLexicalUses() {
         XCTAssertEqual(SpokenNumberNormalizer.normalize("只有一个问题"), "只有一个问题")
         XCTAssertEqual(SpokenNumberNormalizer.normalize("星期一见"), "星期一见")
         XCTAssertEqual(SpokenNumberNormalizer.normalize("千万不要"), "千万不要")
         XCTAssertEqual(SpokenNumberNormalizer.normalize("一心一意"), "一心一意")
+    }
+
+    func testChineseNormalizerPreservesWanYi() {
+        for text in ["万一出错了怎么办", "以防万一", "万一他不来呢", "萬一下雨"] {
+            XCTAssertEqual(SpokenNumberNormalizer.normalize(text), text)
+        }
+        // A quantity that merely contains 万 still converts.
+        XCTAssertEqual(SpokenNumberNormalizer.normalize("一万一千"), "11000")
+        XCTAssertEqual(SpokenNumberNormalizer.normalize("三万"), "30000")
+    }
+
+    func testChineseNormalizerPreservesApproximationsAndIdioms() {
+        for text in ["三四个", "两三天", "一两个人", "五六次", "七八个", "三五成群",
+                     "一一对应", "三三两两", "三四十个", "十三四岁"] {
+            XCTAssertEqual(SpokenNumberNormalizer.normalize(text), text)
+        }
+        // Digit sequences that are not estimates still convert.
+        XCTAssertEqual(SpokenNumberNormalizer.normalize("房间号一零"), "房间号10")
+        XCTAssertEqual(SpokenNumberNormalizer.normalize("三四五"), "345")
+        XCTAssertEqual(SpokenNumberNormalizer.normalize("四三"), "43")
+        XCTAssertEqual(SpokenNumberNormalizer.normalize("十一个人"), "11个人")
     }
 
     func testSpokenNumbersPreserveUnrelatedTextAndPunctuation() {

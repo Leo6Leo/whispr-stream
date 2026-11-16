@@ -187,6 +187,9 @@ enum SpokenNumberNormalizer {
         }
         let integer: String
         if containsUnit {
+            // A quantity never opens with 万 or 亿; a run that does is the
+            // word 万一 ("in case"), not 10001.
+            if let first = integerCharacters.first, chineseLargeUnits[first] != nil { return nil }
             // Requiring an explicit digit avoids rewriting lexical uses of
             // unit-only forms such as "千万不要".
             guard integerCharacters.contains(where: { chineseDigits[$0] != nil }),
@@ -198,6 +201,10 @@ enum SpokenNumberNormalizer {
             // as isolated English small-number words are preserved.
             guard digits.count == integerCharacters.count,
                   digits.count >= 2 || !fractionCharacters.isEmpty || negative else { return nil }
+            if fractionCharacters.isEmpty, !negative,
+               isChineseApproximationOrIdiom(integerCharacters, digits: digits) {
+                return nil
+            }
             integer = digits.map(String.init).joined()
         }
 
@@ -206,6 +213,21 @@ enum SpokenNumberNormalizer {
             result += "." + fractionCharacters.compactMap { chineseDigits[$0] }.map(String.init).joined()
         }
         return result
+    }
+
+    private static let chineseDigitIdioms: Set<String> = ["一一", "三三两两", "三三兩兩", "七七八八"]
+
+    /// Two bare digits side by side are almost always an estimate in Chinese
+    /// prose (三四个, 两三天, 三五成群), not the number 34. Real two-digit
+    /// numbers are spoken with 十; codes and identifiers run longer or
+    /// contain a zero, and those still convert.
+    private static func isChineseApproximationOrIdiom(
+        _ characters: ArraySlice<Character>,
+        digits: [Int64]
+    ) -> Bool {
+        if chineseDigitIdioms.contains(String(characters)) { return true }
+        guard digits.count == 2, digits[0] >= 1 else { return false }
+        return digits[1] == digits[0] + 1 || (digits[0] == 3 && digits[1] == 5)
     }
 
     private static func parseChineseInteger(_ characters: ArraySlice<Character>) -> Int64? {
@@ -246,6 +268,18 @@ enum SpokenNumberNormalizer {
             }
 
             return nil
+        }
+
+        // Colloquial speech drops the last unit: 两千五 is 2500, 一百二 is
+        // 120, 三万五 is 35000. A digit straight after 百 or larger counts in
+        // the next unit down; 零 in between (两千零五) or 十 before it
+        // (二十五) keeps it as ones.
+        if let digit = pendingDigit, digit != 0, characters.count >= 2,
+           case let previous = characters[characters.index(characters.endIndex, offsetBy: -2)],
+           let previousUnit = chineseSmallUnits[previous] ?? chineseLargeUnits[previous],
+           previousUnit >= 100 {
+            guard let scaled = safeMultiply(digit, previousUnit / 10) else { return nil }
+            pendingDigit = scaled
         }
 
         guard let withPending = safeAdd(section, pendingDigit ?? 0) else { return nil }
