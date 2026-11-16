@@ -801,6 +801,104 @@ class FinalModelTests(unittest.TestCase):
         self.preview(server, [voice(0.2)])
         self.assertEqual(self.final_session.calls, [])
 
+    def test_final_model_is_woken_once_per_long_utterance(self):
+        # Previously every preview past FINAL_MODEL_IDLE_WAKE_SEC re-woke the
+        # model, stalling live text every 15 s of one long dictation.
+        server = self.make_server(["你好。"] * 5, ["", "你好啊。"])
+        with patch.object(asr_server, "FINAL_MODEL_IDLE_WAKE_SEC", 0.0):
+            self.preview(server, [voice(0.2)] * 4)
+            self.assertEqual(self.final_session.calls, [{}])
+            self.assertEqual(self.final(server)["text"], "你好啊。")
+
+    def test_long_utterance_rewakes_only_after_the_long_interval(self):
+        server = self.make_server(["你好。"] * 4, ["", ""])
+        server._final_session_used_at = time.perf_counter() - 60
+        remaining = iter([voice(0.2)] * 3)
+
+        class AgeFinalModel:
+            def wait(self, timeout):
+                addition = next(remaining, None)
+                if addition is None:
+                    return True
+                server.buf = np.concatenate((server.buf, addition))
+                # Pretend the model sat idle well past the 15 s threshold but
+                # short of the re-wake interval, then past that interval too.
+                idle = 16.0 if len(server.buf) < samples(5.5) else asr_server.FINAL_MODEL_REWAKE_SEC + 1
+                server._final_session_used_at = time.perf_counter() - idle
+                return False
+
+            def set(self):
+                pass
+
+        server._preview_stop = AgeFinalModel()
+        with patch.object(asr_server, "emit"):
+            server._loop()
+        # Woken after the first preview, not at 16 s idle, again past 60 s.
+        self.assertEqual(self.final_session.calls, [{}, {}])
+
+    def test_next_utterance_wakes_the_final_model_again(self):
+        server = self.make_server(["你好。"] * 4, ["", ""])
+        server._final_session_used_at = time.perf_counter() - 60
+        self.preview(server, [])
+        self.assertEqual(len(self.final_session.calls), 1)
+        server._preview_stop = asr_server.threading.Event()
+        with patch.object(asr_server.threading, "Thread"):
+            server.start()
+        server._thread = None
+        server.buf = voice(5.0)
+        server._final_session_used_at = time.perf_counter() - 60
+        self.preview(server, [])
+        self.assertEqual(len(self.final_session.calls), 2)
+
+    # -- stop() while the preview thread is still decoding ------------------
+
+    def run_preview_thread(self, server):
+        server._preview_stop = threading.Event()
+        server._thread = threading.Thread(target=server._loop, daemon=True)
+        server._thread.start()
+
+    def blocking(self, session, outputs, block_on_call):
+        """Make call number ``block_on_call`` wait until the test releases it."""
+        entered, release = threading.Event(), threading.Event()
+        responses = iter(outputs)
+
+        def transcribe(audio, **kwargs):
+            session.calls.append(kwargs)
+            if len(session.calls) == block_on_call:
+                entered.set()
+                release.wait(timeout=5)
+            return SimpleNamespace(text=next(responses), language="Chinese")
+
+        session.transcribe = transcribe
+        return entered, release
+
+    def test_stop_during_a_wake_waits_for_it_and_keeps_the_dictation(self):
+        server = self.make_server(["你好。"] * 3, [])
+        server._final_session_used_at = time.perf_counter() - 60
+        entered, release = self.blocking(self.final_session, ["", "你好啊。"], 1)
+        with patch.object(asr_server, "emit"):
+            self.run_preview_thread(server)
+            self.assertTrue(entered.wait(timeout=2))
+        threading.Timer(0.05, release.set).start()
+        final = self.final(server)
+        self.assertEqual(final["text"], "你好啊。")
+        self.assertIsNone(server._thread)
+        # The wake, then the final; no second preview or wake after release.
+        self.assertEqual(len(self.final_session.calls), 2)
+        self.assertEqual(len(self.preview_session.calls), 1)
+
+    def test_stop_during_a_preview_skips_the_wake(self):
+        server = self.make_server([], ["你好啊。"])
+        server._final_session_used_at = time.perf_counter() - 60
+        entered, release = self.blocking(self.preview_session, ["你好。"] * 2, 1)
+        with patch.object(asr_server, "emit"):
+            self.run_preview_thread(server)
+            self.assertTrue(entered.wait(timeout=2))
+        threading.Timer(0.05, release.set).start()
+        self.assertEqual(self.final(server)["text"], "你好啊。")
+        # Only the final ran on the large model: the final pages it in itself.
+        self.assertEqual(len(self.final_session.calls), 1)
+
     def test_large_final_model_never_sees_the_vocabulary_prompt(self):
         server = self.make_server(
             ["不要 post 任何东西。"], ["不要 post 任何东西，用 Cloud。"],
@@ -866,3 +964,70 @@ class FinalModelTests(unittest.TestCase):
         self.assertTrue(asr_server.final_translated_the_speech(
             "这个太麻烦了。我想先确定这个能不能 work", "This is too much. I want to first confirm if this can work."
         ))
+
+
+class StopWaitTests(unittest.TestCase):
+    """stop() waits out a slow preview thread instead of dropping the text."""
+
+    def make_server(self, outputs):
+        session = SimpleNamespace(
+            transcribe=lambda audio, **kw: SimpleNamespace(text=next(outputs), language="Chinese")
+        )
+        with patch.object(asr_engine, "build_session", return_value=(session, 0)), \
+             patch.object(asr_server, "emit"):
+            server = asr_server.Server("test", 8, "")
+        server.buf = voice(3.0)
+        server.active = True
+        return server
+
+    def scripted_thread(self, server, clock, decodes, ends_at):
+        """A preview thread on a fake clock: decode boundaries, then exit."""
+
+        class Thread:
+            def join(self, timeout=None):
+                clock[0] += timeout
+                for boundary in decodes:
+                    if boundary <= clock[0]:
+                        server._decode_progress_at = boundary
+
+            def is_alive(self):
+                return ends_at is None or clock[0] < ends_at
+
+        return Thread()
+
+    def stop(self, server, thread, clock):
+        server._thread = thread
+        with patch.object(asr_server.time, "perf_counter", lambda: clock[0]), \
+             patch.object(asr_server, "emit") as emitted:
+            server.stop()
+        return [call.args[0] for call in emitted.call_args_list]
+
+    def test_slow_but_progressing_decodes_are_waited_out(self):
+        # A 3.1 s cold wake, then a 4 s preview decode: 7.1 s in all, past the
+        # old fixed 5 s join that threw the dictation away.
+        clock = [100.0]
+        server = self.make_server(iter(["你好。"]))
+        thread = self.scripted_thread(server, clock, [100.0, 103.1, 103.1, 107.1], 107.1)
+        events = self.stop(server, thread, clock)
+        self.assertEqual([event["type"] for event in events], ["final"])
+        self.assertEqual(events[0]["text"], "你好。")
+        self.assertIsNone(server._thread)
+
+    def test_a_hung_decode_still_gives_up_and_keeps_the_thread(self):
+        clock = [100.0]
+        server = self.make_server(iter([]))
+        thread = self.scripted_thread(server, clock, [100.0], None)
+        events = self.stop(server, thread, clock)
+        self.assertEqual(events, [{"type": "error", "message": "final: preview decode did not stop"}])
+        self.assertAlmostEqual(clock[0] - 100.0, asr_server.PREVIEW_DECODE_STALL_SEC, delta=0.1)
+        # start() can still wait for it before the next dictation.
+        self.assertIs(server._thread, thread)
+
+    def test_endless_progress_is_still_bounded(self):
+        clock = [100.0]
+        server = self.make_server(iter([]))
+        boundaries = [100.0 + 0.5 * step for step in range(1000)]
+        thread = self.scripted_thread(server, clock, boundaries, None)
+        events = self.stop(server, thread, clock)
+        self.assertEqual(events[0]["type"], "error")
+        self.assertAlmostEqual(clock[0] - 100.0, asr_server.STOP_PREVIEW_WAIT_MAX_SEC, delta=0.1)

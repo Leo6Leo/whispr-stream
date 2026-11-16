@@ -86,6 +86,27 @@ PREROLL_SEC = 0.3
 # time wakes that model while the user is still speaking, so its paged-out
 # weights are not paid for after the key is released.
 FINAL_MODEL_IDLE_WAKE_SEC = 15.0
+# The wake exists to pay the page-in cost once per utterance. Re-waking every
+# 15 s of one continuous dictation stalled live previews for 0.1-1 s each time
+# although the model had been touched seconds earlier. A very long utterance
+# (the buffer holds up to MAX_BUFFER_SEC of audio, and a dictation can run on
+# past that) could in principle let the model be paged out again before the
+# release, so allow a second wake only after this much more idle time.
+FINAL_MODEL_REWAKE_SEC = 60.0
+
+# stop() must wait for the preview thread before the final decode, because MLX
+# decodes must never overlap, and a decode cannot be interrupted. A fixed 5 s
+# join dropped a whole dictation in 1.0.5 under memory pressure, and a cold
+# 1.7B wake measured 3.1 s on its own, so a slow decode plus one more queued
+# behind it could exceed that. Once stop() is seen the thread finishes at most
+# the decode in flight and one vocabulary check (the wake is skipped), so keep
+# waiting while decodes keep finishing; give up only when one decode has run
+# this long without returning (5x the slowest measured cold decode, 2.5-4 s)...
+PREVIEW_DECODE_STALL_SEC = 20.0
+# ...or when the whole wait reaches this, whatever the progress. The app keeps
+# showing "Transcribing…" meanwhile and has no deadline of its own.
+STOP_PREVIEW_WAIT_MAX_SEC = 45.0
+STOP_PREVIEW_JOIN_SLICE_SEC = 0.05
 
 # On a Mac deep into swap the model's weights are paged out after a few idle
 # minutes, and the pre-roll or first preview then took 2.5-4 s (field log,
@@ -1232,7 +1253,13 @@ class Server:
             kw["language"] = language
         if session is not None and session is getattr(self, "final_session", None):
             self._final_session_used_at = time.perf_counter()
-        raw_result = (session or self.session).transcribe(audio, **kw)
+        # Every decode boundary is progress for stop()'s wait on the preview
+        # thread: a decode that keeps returning is slow, not hung.
+        self._decode_progress_at = time.perf_counter()
+        try:
+            raw_result = (session or self.session).transcribe(audio, **kw)
+        finally:
+            self._decode_progress_at = time.perf_counter()
         detected_language = normalize_detected_language(
             getattr(raw_result, "language", None)
         )
@@ -1498,6 +1525,48 @@ class Server:
         self._thread = None
         return True
 
+    def _await_preview_thread(self) -> bool:
+        """Wait for the preview thread before the final decode.
+
+        No fixed timeout: a slow preview decode or final-model wake is waited
+        out as long as decodes keep finishing, because giving up throws the
+        whole dictation away. Only a single decode stuck for
+        PREVIEW_DECODE_STALL_SEC, or a wait of STOP_PREVIEW_WAIT_MAX_SEC in
+        all, counts as hung. A thread still alive then is kept so start()
+        can wait for it.
+        """
+        thread = self._thread
+        if thread is None:
+            return True
+        started = time.perf_counter()
+        while True:
+            thread.join(timeout=STOP_PREVIEW_JOIN_SLICE_SEC)
+            if not thread.is_alive():
+                break
+            now = time.perf_counter()
+            progress = max(started, getattr(self, "_decode_progress_at", started))
+            if (
+                now - progress >= PREVIEW_DECODE_STALL_SEC
+                or now - started >= STOP_PREVIEW_WAIT_MAX_SEC
+            ):
+                print(
+                    "[asr] preview thread still busy after "
+                    f"{int((now - started) * 1000)}ms "
+                    f"(no decode progress for {int((now - progress) * 1000)}ms)",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return False
+        self._thread = None
+        waited = time.perf_counter() - started
+        if waited >= 1.0:
+            print(
+                f"[asr] final waited {int(waited * 1000)}ms for the preview thread",
+                file=sys.stderr,
+                flush=True,
+            )
+        return True
+
     def _preroll(self) -> None:
         """Pay any cold-start cost before there is audio worth decoding."""
         with self.lock:
@@ -1527,14 +1596,21 @@ class Server:
 
         Runs on the preview thread between two previews, so it never overlaps
         another decode. It costs one short decode, and only when the final
-        model has not run for FINAL_MODEL_IDLE_WAKE_SEC.
+        model has not run for FINAL_MODEL_IDLE_WAKE_SEC; within one utterance
+        it repeats only after FINAL_MODEL_REWAKE_SEC more idle time. Once
+        stop() has been seen it is skipped: the final decode pages the model
+        in itself, and a wake would only delay it.
         """
         final_session = getattr(self, "final_session", None)
         if final_session is None or not self.active:
             return
+        utterance = getattr(self, "_utterance_seq", 0)
+        woken = getattr(self, "_final_model_woken_utterance", None) == utterance
+        threshold = FINAL_MODEL_REWAKE_SEC if woken else FINAL_MODEL_IDLE_WAKE_SEC
         idle = time.perf_counter() - getattr(self, "_final_session_used_at", float("-inf"))
-        if idle < FINAL_MODEL_IDLE_WAKE_SEC:
+        if idle < threshold:
             return
+        self._final_model_woken_utterance = utterance
         started = time.perf_counter()
         try:
             self._decode_result(
@@ -1909,7 +1985,7 @@ class Server:
             return
 
         wait_started = time.perf_counter()
-        if not self._join_preview_thread():
+        if not self._await_preview_thread():
             emit({"type": "error", "message": "final: preview decode did not stop"})
             return
         wait_ms = int((time.perf_counter() - wait_started) * 1000)
