@@ -93,7 +93,18 @@ final class AppWindows {
             present(settings)
             return
         }
-        let window = makeWindow(title: "Settings - WhisprStream", styleMask: [.titled, .closable])
+        // A standard titled window with a toolbar, as in System Settings:
+        // fullSizeContentView lets the split view run the full height so the
+        // sidebar's material shows through the toolbar's sidebar region and
+        // SwiftUI draws its tracking separator at the seam. Fixed width
+        // (740 pt, the width System Settings opens at); the sections vary in
+        // height, so the height stays resizable.
+        let window = makeWindow(
+            title: "Settings - WhisprStream",
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+        )
+        window.identifier = NSUserInterfaceItemIdentifier("whisprstream-settings")
+        window.setContentSize(NSSize(width: 740, height: 684))
         let host = NSHostingView(rootView: SettingsView(
             settings: appSettings,
             runtime: runtime,
@@ -105,9 +116,6 @@ final class AppWindows {
             }
         ))
         window.contentView = host
-        // Let the tabbed form declare its own size rather than forcing one —
-        // a hard-coded height is what clipped the last section before.
-        window.setContentSize(host.fittingSize)
         settings = window
         present(window)
     }
