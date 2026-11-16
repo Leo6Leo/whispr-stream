@@ -1,50 +1,77 @@
 import AppKit
 import SwiftUI
 
-/// Native macOS settings with a permanently visible labeled sidebar.
-///
-/// A native TabView collapses its labels into an icon-only strip when macOS
-/// decides space is tight. Settings contains six sections, so a fixed sidebar
-/// is clearer and does not turn navigation into an overflow control.
+/// The settings window, laid out like System Settings: a sidebar of sections
+/// and a detail column with the selected section's form. The section's name
+/// is the window title, drawn in the toolbar.
 struct SettingsView: View {
     @ObservedObject var settings: Settings
     @ObservedObject var runtime: RuntimeManager
     @ObservedObject var updates: AppUpdateManager
     @ObservedObject var navigation: SettingsNavigation
     let onShowUpdate: () -> Void
-    @State private var selectedSection: SettingsSection? = .general
+
+    // System Settings reopens on the pane that was last shown; so does this.
+    @AppStorage("settingsSelectedPane") private var selection: SettingsSection = .general
+
+    /// The list takes an optional selection so the detail pane follows clicks.
+    private var listSelection: Binding<SettingsSection?> {
+        Binding(
+            get: { selection },
+            set: { if let section = $0 { selection = section } }
+        )
+    }
 
     var body: some View {
-        HStack(spacing: 0) {
-            List(SettingsSection.allCases, selection: $selectedSection) { section in
-                HStack(spacing: 8) {
-                    Label(section.title, systemImage: section.symbol)
-                    Spacer(minLength: 4)
-                    if section == .about, updates.status.showsUpdateAttention {
-                        Circle()
-                            .fill(Color.accentColor)
-                            .frame(width: 7, height: 7)
-                            .accessibilityLabel("Update available")
+        // System Settings' shell: the plain two-column split view with the
+        // sidebar toggle removed from the toolbar and the section name as the
+        // window title. The transparent title bar with the traffic lights over
+        // the sidebar comes with the split view itself.
+        NavigationSplitView {
+            sidebar
+                .toolbar(removing: .sidebarToggle)
+                .navigationSplitViewColumnWidth(232)
+        } detail: {
+            // The detail column is a NavigationStack, as in System Settings —
+            // it is what integrates the scrolling form with the toolbar's
+            // scroll-edge effect (the translucent strip that replaces the
+            // toolbar's fill when a pane is scrolled).
+            NavigationStack {
+                VStack(spacing: 0) {
+                    if let release = updates.status.availableRelease {
+                        SettingsUpdateBanner(release: release, action: onShowUpdate)
+                        Divider()
+                    }
+
+                    selectedContent
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                // The Form's default 20 pt top content margin puts the first
+                // card 8 pt lower than where System Settings starts its cards
+                // below the toolbar; cancel that extra 8 pt. The scroll area
+                // extends under the toolbar by the same amount, which the
+                // scroll-edge effect covers.
+                .contentMargins(.top, -8, for: .scrollContent)
+                // The section's name as the window title, rendered by the
+                // system in the toolbar after the leading spacer — plain text
+                // with no glass capsule, the way System Settings names its
+                // panes. The spacer keeps the toolbar alive and the title at
+                // the leading edge of the detail column.
+                .navigationTitle(selection.title)
+                .toolbar {
+                    if #available(macOS 26.0, *) {
+                        ToolbarSpacer(.fixed, placement: .navigation)
                     }
                 }
-                .tag(section)
-            }
-            .listStyle(.sidebar)
-            .frame(width: 160)
-
-            Divider()
-
-            VStack(spacing: 0) {
-                if let release = updates.status.availableRelease {
-                    SettingsUpdateBanner(release: release, action: onShowUpdate)
-                    Divider()
-                }
-
-                selectedContent
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .frame(width: 760, height: 540)
+        // The hosting view drives the window's min/max sizes from these
+        // constraints (they override any NSWindow minSize/maxSize). A fixed
+        // width here is what makes the window vertical-only resizable:
+        // AppKit reads the matching min/max width and drops the horizontal
+        // resize cursor from the side edges. The sections vary in height, so
+        // the height keeps a floor and no ceiling.
+        .frame(minWidth: 740, idealWidth: 740, maxWidth: 740, minHeight: 420)
         .onAppear {
             if case .idle = updates.status {
                 updates.checkForUpdates()
@@ -53,13 +80,33 @@ struct SettingsView: View {
         // Replays the current request on first subscription, so a window
         // created for a particular section opens on it.
         .onReceive(navigation.$section) { section in
-            if let section { selectedSection = section }
+            if let section { selection = section }
         }
+    }
+
+    private var sidebar: some View {
+        List(SettingsSection.allCases, selection: listSelection) { section in
+            HStack(spacing: 8) {
+                Label(section.title, systemImage: section.symbol)
+                Spacer(minLength: 4)
+                if section == .about, updates.status.showsUpdateAttention {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 7, height: 7)
+                        .accessibilityLabel("Update available")
+                }
+            }
+            // 32 pt row pitch with 24 pt of content, matching System
+            // Settings' sidebar rows.
+            .frame(minHeight: 24, alignment: .leading)
+            .tag(section)
+        }
+        .listStyle(.sidebar)
     }
 
     @ViewBuilder
     private var selectedContent: some View {
-        switch selectedSection ?? .general {
+        switch selection {
         case .general: GeneralTab(settings: settings)
         case .model: ModelTab(settings: settings)
         case .sound: SoundTab(settings: settings)

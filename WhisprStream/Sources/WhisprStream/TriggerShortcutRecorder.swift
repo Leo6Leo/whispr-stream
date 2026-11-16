@@ -198,7 +198,11 @@ struct TriggerShortcutEditor: View {
 
             Text(settings.triggerShortcut.compactDisplay)
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .frame(minWidth: compact ? 110 : 132, alignment: .leading)
+                // Only the compact layout needs a floor to keep its button
+                // from shifting; the full one pins its buttons trailing with
+                // a spacer, and in the Settings detail column 132 pt pushed
+                // "Reset to Default" into truncation.
+                .frame(minWidth: compact ? 110 : nil, alignment: .leading)
                 .accessibilityLabel(settings.triggerShortcut.accessibilityLabel)
 
             if !compact {
