@@ -12,7 +12,7 @@ This release redesigns Settings, adds launch at login, stops the setup guide fro
 ### Fixes
 
 - **The setup guide no longer reopens on every launch.** The launch decision was made before the engine's health check had finished, so release builds always fell into the guide. It now waits for the check, starts the session when the engine is healthy, and opens the guide only for people who have not completed setup. Thanks to **[@logonoff](https://github.com/logonoff)** for finding and fixing this.
-- **The 1.7B model no longer translates Chinese into English.** With the vocabulary list in its prompt, the 1.7B model labelled mixed Chinese and English speech as English and wrote whole Chinese sentences as English translations: five of 73 real dictations, against none without the prompt. The 1.7B model now decodes without the vocabulary prompt, on its own or as the final-text model, and vocabulary spelling is restored afterwards. The 0.6B model was not affected and is unchanged.
+- **The 1.7B model no longer translates Chinese into English.** With the vocabulary list in its prompt, the 1.7B model labelled mixed Chinese and English speech as English and wrote whole Chinese sentences as English translations: five of 73 real dictations, against none without the prompt. The 1.7B model now decodes without the vocabulary prompt, on its own or as the final-text model, and the spelling of single-word vocabulary terms is restored afterwards. The 0.6B model was not affected and is unchanged.
 - **Colloquial Chinese quantities read correctly.** *两千五* is 2500 and *一百二* is 120; they used to become 2005 and 102. *两千零五*, *二十五*, and *一百二十* are unchanged.
 - **Words are no longer mistaken for numbers.** *万一* stays a word instead of becoming 10001, and two bare digits side by side (*三四个*, *两三天*) stay an estimate instead of becoming 34 or 23. Idioms such as *三三两两* are left alone. Longer digit runs and runs containing a zero still convert.
 - **A real *啊！* is kept.** Filler-word removal dropped an interjection the engine had written with an exclamation or question mark (*啊！我给忘了*, *啊？*). Those are speech, not hesitation, and now stay. *啊，* and *啊。* at a pause are still removed.
@@ -27,6 +27,8 @@ Thanks to **[@logonoff](https://github.com/logonoff)** for three pull requests i
 ### Known limitations
 
 - The vocabulary spelling pass can still rewrite a correct word into a vocabulary term that looks similar (*Word Cloud* into *Word Claude* when *Claude* is in your vocabulary). Remove the term from the vocabulary if this affects you.
+- With the 1.7B model, alone or as the final-text model, the vocabulary no longer steers recognition: multi-word terms, Chinese terms, and Voice Shortcut triggers get no help, and only the spelling of single-word terms is corrected afterwards. Vocabulary works as before with the 0.6B model.
+- Selecting the 1.7B model on its own can still occasionally write mixed Chinese and English speech as English; the final-text beta guards against this by checking the result against the fast model.
 - Names and product names remain the most common mistake with either model.
 - With *Use the 1.7B model for the final text* on, the inserted text can differ from the live preview, since two models wrote them.
 - A dictation that consists only of a hesitation (*Hmm.*) is dropped as empty, with no explanation in the HUD. Turn filler-word removal off under Settings → General → Output if you dictate those deliberately.
