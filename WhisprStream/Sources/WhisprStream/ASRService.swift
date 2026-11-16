@@ -38,7 +38,8 @@ final class ASRService {
         bits: Int,
         context: String,
         shortUtteranceLanguage: ShortUtteranceLanguage,
-        learnedContext: String = ""
+        learnedContext: String = "",
+        finalModel: String? = nil
     ) {
         process.executableURL = python
         process.arguments = PythonProcessEnvironment.scriptArguments(script: script)
@@ -57,6 +58,8 @@ final class ASRService {
             "WHISPR_BITS": String(bits),
             "WHISPR_CONTEXT": context,
             "WHISPR_LEARNED_CONTEXT": learnedContext,
+            // Empty means one model for previews and the final text.
+            "WHISPR_FINAL_MODEL": finalModel ?? "",
             "WHISPR_SHORT_UTTERANCE_LANGUAGE":
                 shortUtteranceLanguage.fixedModelLanguage ?? "",
         ])
