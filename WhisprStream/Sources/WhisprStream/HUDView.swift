@@ -86,6 +86,10 @@ struct HUDView: View {
         // phase. Separate modifiers per field fight each other mid-resize.
         .animation(.spring(response: 0.30, dampingFraction: 0.85), value: state.displayText)
         .animation(.spring(response: 0.26, dampingFraction: 0.72), value: state.phase)
+        // "Listening…" becoming "Waking up the speech model…" changes the
+        // line and the capsule's width with no phase or text change to ride
+        // on; without its own driver the swap snapped.
+        .animation(.spring(response: 0.30, dampingFraction: 0.85), value: state.isModelWaking)
         .animation(.easeInOut(duration: 0.2), value: state.isApproachingDictationLimit)
         .animation(.easeInOut(duration: 0.2), value: state.notice)
         .animation(.easeInOut(duration: 0.2), value: showsPerformanceNotice)
