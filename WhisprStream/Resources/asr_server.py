@@ -518,6 +518,31 @@ def model_translates_with_context(model_id: str) -> bool:
     return "qwen3-asr-1.7b" in (model_id or "").casefold()
 
 
+def script_units(text: str) -> tuple[int, int]:
+    """Return (Han characters, Latin words) in a transcript."""
+    han = sum(1 for character in text if "\u4e00" <= character <= "\u9fff")
+    latin = len(re.findall(r"[A-Za-z][A-Za-z'’-]*", text))
+    return han, latin
+
+
+def final_translated_the_speech(preview: str, final: str) -> bool:
+    """True when the final model wrote the fast model's speech in another language.
+
+    Compares two decodes of the same audio, so intentional mixed speech is
+    safe: both models then agree on roughly how much of each script there is.
+    The preview may cover less audio than the final, never more, so a final
+    with far less Chinese than the preview has lost it to translation.
+    """
+    preview_han, preview_latin = script_units(preview)
+    final_han, final_latin = script_units(final)
+    if preview_han >= 3 and final_han < 0.3 * preview_han:
+        return True
+    return (
+        preview_han == 0 and preview_latin >= 3
+        and final_han >= 3 and final_han > final_latin
+    )
+
+
 def learnable_context(text: str) -> str:
     """Drop everyday words from learned hints (defence in depth; the app
     already filters them). ``the`` as a decoder bias has become ``OAuth``."""
@@ -1929,9 +1954,41 @@ class Server:
 
         inference_started = time.perf_counter()
         try:
-            result = self._decode_final_result(
-                decode_audio, context, full_audio=audio, session=final_session
-            )
+            final_rejected = False
+            if final_session is None:
+                result = self._decode_final_result(
+                    decode_audio, context, full_audio=audio
+                )
+            else:
+                # The fast model has listened to this utterance all along and
+                # does not mistake mixed speech for another language; the
+                # larger model sometimes does and then translates. Its
+                # language is therefore taken from the fast model's latest
+                # preview, and a final that still changed language is
+                # replaced by the fast model's own final decode.
+                with self.lock:
+                    fast_text = self._last_preview_text or ""
+                    fast_language = normalize_short_utterance_language(
+                        getattr(self, "_last_preview_detected_language", None) or ""
+                    )
+                result = self._decode_result(
+                    decode_audio,
+                    context,
+                    self._language_for_audio(audio) or fast_language,
+                    session=final_session,
+                )
+                if final_translated_the_speech(fast_text, result.text):
+                    print(
+                        "[asr] final model changed the language; "
+                        "using the preview model's final",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    final_rejected = True
+                    final_session = None
+                    result = self._decode_final_result(
+                        decode_audio, context, full_audio=audio
+                    )
             # Automatic language detection must preserve intentional mixed
             # speech. Script counts cannot distinguish it from a translation;
             # only the user's explicit short-clip preference forces a language.
@@ -1951,6 +2008,7 @@ class Server:
             # dictations into a question, so that mode asks nothing.
             if (
                 final_session is None
+                and not final_rejected
                 and self._language_for_audio(audio) is None
                 and context_check not in {"context-check-error", "context-check-unresolved"}
             ):
@@ -1968,6 +2026,8 @@ class Server:
         mode = "fresh-final"
         if final_session is not None:
             mode += "-final-model"
+        elif final_rejected:
+            mode += "-final-model-rejected"
         if pause_compressed:
             mode += "-pause-compressed"
         if lead_trimmed or tail_trimmed:

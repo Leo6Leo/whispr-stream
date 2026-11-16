@@ -712,14 +712,14 @@ class FinalModelTests(unittest.TestCase):
 
     def make_server(self, preview_outputs, final_outputs, *, context="",
                     final_model="large", fail_final_load=False, seconds=5.0,
-                    model="small"):
+                    model="small", language="Chinese"):
         def fake_session(outputs):
             calls = []
             responses = iter(outputs)
 
             def transcribe(audio, **kwargs):
                 calls.append(kwargs)
-                return SimpleNamespace(text=next(responses), language="Chinese")
+                return SimpleNamespace(text=next(responses), language=language)
 
             return SimpleNamespace(transcribe=transcribe, calls=calls)
 
@@ -771,7 +771,7 @@ class FinalModelTests(unittest.TestCase):
         before = len(self.preview_session.calls)
         self.final(server)
         self.assertEqual(len(self.preview_session.calls), before)
-        self.assertEqual(self.final_session.calls, [{"context": "Claude"}, {}])
+        self.assertEqual(self.final_session.calls, [{"context": "Claude", "language": "Chinese"}, {}])
 
     def test_same_or_empty_final_model_loads_one_session(self):
         for final_model in ("", "small"):
@@ -810,7 +810,7 @@ class FinalModelTests(unittest.TestCase):
         self.preview(server, [])
         final = self.final(server)
         # One unprompted decode; the vocabulary spelling is restored after it.
-        self.assertEqual(self.final_session.calls, [{}])
+        self.assertEqual(self.final_session.calls, [{"language": "Chinese"}])
         self.assertEqual(final["text"], "不要 post 任何东西，用 Claude。")
         self.assertEqual(final["mode"], "fresh-final-final-model-context-variant-canonicalized")
         self.assertEqual(self.preview_session.calls[0], {"context": "Claude\nCodex"})
@@ -828,4 +828,41 @@ class FinalModelTests(unittest.TestCase):
         server = self.make_server(["Use Codec."], ["Use Codec."], context="Sharada")
         self.preview(server, [])
         self.final(server)
-        self.assertEqual(self.final_session.calls, [{"context": "Sharada"}])
+        self.assertEqual(self.final_session.calls, [{"context": "Sharada", "language": "Chinese"}])
+
+    def test_final_model_takes_its_language_from_the_fast_model(self):
+        server = self.make_server(["不要 post 任何东西。"], ["不要 post 任何东西。"])
+        self.preview(server, [])
+        self.final(server)
+        self.assertEqual(self.final_session.calls, [{"language": "Chinese"}])
+
+    def test_translated_final_is_replaced_by_the_fast_models_final(self):
+        server = self.make_server(
+            ["不要 post 任何东西。", "不要 post 任何东西。"], ["Don't post any things."]
+        )
+        self.preview(server, [])
+        final = self.final(server)
+        self.assertEqual(final["text"], "不要 post 任何东西。")
+        self.assertEqual(final["mode"], "fresh-final-final-model-rejected")
+        self.assertNotIn("reviews", final)
+
+    def test_english_speech_written_in_chinese_is_replaced_too(self):
+        server = self.make_server(
+            ["When would you be free?"] * 2, ["你什么时候有空？"], language="English"
+        )
+        self.preview(server, [])
+        self.assertEqual(self.final(server)["text"], "When would you be free?")
+
+    def test_mixed_speech_is_not_mistaken_for_translation(self):
+        cases = [
+            ("那你 spin up 一个 sub agent 的 ops 来修复一下吧。", "那你 spin up 一个 sub agent 的 opus 来修复一下吧。"),
+            ("十三。When would you be free?", "Sure thing. When would you be free?"),
+            ("我明日了。", "我 merge 了。"),
+            ("", "Don't post any things."),
+        ]
+        for preview, final in cases:
+            with self.subTest(final=final):
+                self.assertFalse(asr_server.final_translated_the_speech(preview, final))
+        self.assertTrue(asr_server.final_translated_the_speech(
+            "这个太麻烦了。我想先确定这个能不能 work", "This is too much. I want to first confirm if this can work."
+        ))
