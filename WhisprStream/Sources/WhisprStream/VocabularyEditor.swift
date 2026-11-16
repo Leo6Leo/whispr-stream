@@ -450,6 +450,7 @@ private struct FlowLayout: Layout {
         var y: CGFloat = 0
         var lineHeight: CGFloat = 0
         var widest: CGFloat = 0
+        var widestChip: CGFloat = 0
 
         for view in subviews {
             let size = view.sizeThatFits(.unspecified)
@@ -460,7 +461,15 @@ private struct FlowLayout: Layout {
             }
             x += size.width + spacing
             widest = max(widest, x - spacing)
+            widestChip = max(widestChip, size.width)
             lineHeight = max(lineHeight, size.height)
+        }
+        // The 0 probe is how containers read a minimum width. Answering it
+        // with the whole list on one line made that the minimum, and the
+        // split view in Settings squeezed its sidebar trying to honour it.
+        // The layout can wrap down to its widest chip, so that is the floor.
+        if proposal.width == 0 {
+            return CGSize(width: widestChip, height: y + lineHeight)
         }
         return CGSize(width: maxWidth.isFinite ? maxWidth : widest, height: y + lineHeight)
     }
