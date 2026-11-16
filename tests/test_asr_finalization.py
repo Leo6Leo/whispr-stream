@@ -705,3 +705,127 @@ class FirstPreviewTests(FinalizationTests):
         # without decoding until the harness ends it.
         self.assertEqual(server.session.lengths, [samples(0.5)])
         self.assertEqual(events[-1]["committed"] + events[-1]["tail"], "Hi")
+
+
+class FinalModelTests(unittest.TestCase):
+    """Previews on the fast model, the final text from a second model."""
+
+    def make_server(self, preview_outputs, final_outputs, *, context="",
+                    final_model="large", fail_final_load=False, seconds=5.0,
+                    model="small"):
+        def fake_session(outputs):
+            calls = []
+            responses = iter(outputs)
+
+            def transcribe(audio, **kwargs):
+                calls.append(kwargs)
+                return SimpleNamespace(text=next(responses), language="Chinese")
+
+            return SimpleNamespace(transcribe=transcribe, calls=calls)
+
+        preview_session = fake_session(preview_outputs)
+        final_session = fake_session(final_outputs)
+        loaded = []
+
+        def build_session(model_id, bits, *, engine="qwen3", warm=True):
+            loaded.append(model_id)
+            if model_id in ("large", "Qwen/Qwen3-ASR-1.7B") and model_id != model:
+                if fail_final_load:
+                    raise RuntimeError("weights missing")
+                return final_session, 0
+            return preview_session, 0
+
+        with patch.object(asr_engine, "build_session", side_effect=build_session), \
+             patch.object(asr_server, "emit") as emitted:
+            server = asr_server.Server(model, 8, context, final_model_id=final_model)
+        self.ready = [call.args[0] for call in emitted.call_args_list]
+        self.loaded = loaded
+        self.preview_session, self.final_session = preview_session, final_session
+        server.buf = voice(seconds)
+        server.active = True
+        return server
+
+    preview = FinalizationTests.preview
+    final = FinalizationTests.final
+
+    def test_final_text_comes_from_the_final_model_even_with_an_exact_preview(self):
+        server = self.make_server(["我明日了。"], ["我 merge 了。"])
+        self.preview(server, [])
+        final = self.final(server)
+        self.assertEqual(final["text"], "我 merge 了。")
+        self.assertEqual(final["mode"], "fresh-final-final-model")
+        self.assertEqual(len(self.preview_session.calls), 1)
+        self.assertEqual(len(self.final_session.calls), 1)
+
+    def test_disagreement_with_the_preview_never_asks_a_question(self):
+        server = self.make_server(["Use Codex."] * 3, ["Use Codec."])
+        self.preview(server, [voice(0.2)] * 2)
+        final = self.final(server)
+        self.assertEqual(final["text"], "Use Codec.")
+        self.assertNotIn("review", final)
+        self.assertNotIn("reviews", final)
+
+    def test_vocabulary_check_runs_on_the_final_model(self):
+        server = self.make_server(["Use Claude"] * 2, ["Use Claude", "Use Cloud"], context="Claude")
+        self.preview(server, [])
+        before = len(self.preview_session.calls)
+        self.final(server)
+        self.assertEqual(len(self.preview_session.calls), before)
+        self.assertEqual(self.final_session.calls, [{"context": "Claude"}, {}])
+
+    def test_same_or_empty_final_model_loads_one_session(self):
+        for final_model in ("", "small"):
+            with self.subTest(final_model=final_model):
+                server = self.make_server(["你好。"], [], final_model=final_model)
+                self.assertIsNone(server.final_session)
+                self.assertEqual(self.loaded, ["small"])
+                self.preview(server, [])
+                self.assertEqual(self.final(server)["mode"], "reuse-exact")
+
+    def test_final_model_that_cannot_load_falls_back_to_the_preview_model(self):
+        server = self.make_server(["你好。"], [], fail_final_load=True)
+        self.assertIsNone(server.final_session)
+        self.assertEqual([event["type"] for event in self.ready], ["ready"])
+        self.preview(server, [])
+        self.assertEqual(self.final(server)["text"], "你好。")
+
+    def test_idle_final_model_is_woken_once_while_speaking(self):
+        server = self.make_server(["你好。"] * 3, ["", "你好啊。"])
+        server._final_session_used_at = time.perf_counter() - 60
+        self.preview(server, [voice(0.2)] * 2)
+        self.assertEqual(self.final_session.calls, [{}])
+        self.assertEqual(self.final(server)["text"], "你好啊。")
+
+    def test_recently_used_final_model_is_not_woken(self):
+        server = self.make_server(["你好。"] * 2, ["你好啊。"])
+        self.preview(server, [voice(0.2)])
+        self.assertEqual(self.final_session.calls, [])
+
+    def test_large_final_model_never_sees_the_vocabulary_prompt(self):
+        server = self.make_server(
+            ["不要 post 任何东西。"], ["不要 post 任何东西，用 Cloud。"],
+            context="Claude", final_model="Qwen/Qwen3-ASR-1.7B",
+        )
+        server.set_learned_context("Codex")
+        self.preview(server, [])
+        final = self.final(server)
+        # One unprompted decode; the vocabulary spelling is restored after it.
+        self.assertEqual(self.final_session.calls, [{}])
+        self.assertEqual(final["text"], "不要 post 任何东西，用 Claude。")
+        self.assertEqual(final["mode"], "fresh-final-final-model-context-variant-canonicalized")
+        self.assertEqual(self.preview_session.calls[0], {"context": "Claude\nCodex"})
+
+    def test_large_model_on_its_own_is_also_unprompted(self):
+        server = self.make_server(
+            ["用 Cloud。", "用 Cloud。"], [], context="Claude",
+            final_model="", model="Qwen/Qwen3-ASR-1.7B",
+        )
+        events = self.preview(server, [])
+        self.assertEqual(self.preview_session.calls, [{}])
+        self.assertEqual(events[-1]["committed"] + events[-1]["tail"], "用 Claude。")
+
+    def test_other_final_models_keep_the_vocabulary_prompt(self):
+        server = self.make_server(["Use Codec."], ["Use Codec."], context="Sharada")
+        self.preview(server, [])
+        self.final(server)
+        self.assertEqual(self.final_session.calls, [{"context": "Sharada"}])

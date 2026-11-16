@@ -612,7 +612,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             bits: bits,
             context: settings.asrContext,
             shortUtteranceLanguage: settings.shortUtteranceLanguage,
-            learnedContext: learnedContext
+            learnedContext: learnedContext,
+            finalModel: engine == .qwen3 && model == ASRModel.small.rawValue
+                ? settings.finalTextModel?.rawValue
+                : nil
         )
     }
 

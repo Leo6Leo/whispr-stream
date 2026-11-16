@@ -82,6 +82,10 @@ EMPTY_PREVIEW_MIN_NEW_AUDIO = POLL_INTERVAL
 # flight for ~400 ms, so a warm pre-roll (~70 ms) is free, and a cold one
 # overlaps the wait instead of delaying the first visible word.
 PREROLL_SEC = 0.3
+# With a separate final model, a dictation that starts after this much idle
+# time wakes that model while the user is still speaking, so its paged-out
+# weights are not paid for after the key is released.
+FINAL_MODEL_IDLE_WAKE_SEC = 15.0
 
 # On a Mac deep into swap the model's weights are paged out after a few idle
 # minutes, and the pre-roll or first preview then took 2.5-4 s (field log,
@@ -500,6 +504,18 @@ def review_choice_is_moot(preferred: str, alternative: str) -> bool:
     homophone pronoun (``back end``/``Backend``, ``Uh,``/``uh``, 他/她)."""
     key = moot_review_key(preferred)
     return bool(key) and key == moot_review_key(alternative)
+
+
+def model_translates_with_context(model_id: str) -> bool:
+    """True for models that must never see the vocabulary as a prompt.
+
+    Measured on 73 real zh/en dictations: with the (mostly English)
+    vocabulary in its prompt, Qwen3-ASR-1.7B tagged 44 of them English and
+    rendered five Chinese sentences as English translations; without it,
+    none (CER 0.251 -> 0.146). The 0.6B model does not do this. Vocabulary
+    spelling is still restored afterwards by ``canonicalize_context_variants``.
+    """
+    return "qwen3-asr-1.7b" in (model_id or "").casefold()
 
 
 def learnable_context(text: str) -> str:
@@ -1097,11 +1113,44 @@ class Server:
         short_utterance_language: str = "",
         engine: str = "qwen3",
         learned_context: str = "",
+        final_model_id: str = "",
     ):
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from asr_engine import build_session
 
         self.session, load_secs = build_session(model_id, bits, engine=engine)
+        # Sessions (by identity) that decode without any vocabulary prompt.
+        self._promptless_sessions: set[int] = set()
+        if engine == "qwen3" and model_translates_with_context(model_id):
+            self._promptless_sessions.add(id(self.session))
+        # Optional second model: live previews stay on the fast model above,
+        # and only the one authoritative decode after release uses this one.
+        # Both load before "ready" because MLX must not load weights on one
+        # thread while another is decoding.
+        self.final_session = None
+        self._final_session_used_at = float("-inf")
+        if final_model_id and final_model_id != model_id and engine == "qwen3":
+            try:
+                self.final_session, final_secs = build_session(
+                    final_model_id, bits, engine=engine
+                )
+                load_secs += final_secs
+                if model_translates_with_context(final_model_id):
+                    self._promptless_sessions.add(id(self.final_session))
+                self._final_session_used_at = time.perf_counter()
+                print(
+                    f"[asr] final model loaded: {final_model_id} "
+                    f"in {int(final_secs * 1000)}ms",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            except Exception as error:  # noqa: BLE001 - dictation must still work
+                print(
+                    "[asr] final model unavailable, finals use the preview "
+                    f"model: {error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
         emit({"type": "ready", "ms": int(load_secs * 1000)})
 
         self.lock = threading.Lock()
@@ -1145,15 +1194,20 @@ class Server:
         context: str,
         language: str | None = None,
         use_learned_context: bool = True,
+        session=None,
     ) -> DecodeResult:
         # Learned terms are soft decoder hints only. Keep them separate from
         # explicit vocabulary spelling canonicalization and unbiased checks.
         learned = getattr(self, "learned_context", "") if use_learned_context else ""
         prompt = "\n".join(part for part in (context, learned) if part)
+        if self._is_promptless(session):
+            prompt = ""
         kw = {"context": prompt} if prompt else {}
         if language:
             kw["language"] = language
-        raw_result = self.session.transcribe(audio, **kw)
+        if session is not None and session is getattr(self, "final_session", None):
+            self._final_session_used_at = time.perf_counter()
+        raw_result = (session or self.session).transcribe(audio, **kw)
         detected_language = normalize_detected_language(
             getattr(raw_result, "language", None)
         )
@@ -1161,6 +1215,10 @@ class Server:
             text=(raw_result.text or "").strip(),
             language=detected_language or normalize_detected_language(language),
         )
+
+    def _is_promptless(self, session=None) -> bool:
+        active = session if session is not None else getattr(self, "session", None)
+        return id(active) in getattr(self, "_promptless_sessions", ())
 
     def _decode(
         self,
@@ -1198,6 +1256,7 @@ class Server:
         audio: np.ndarray,
         context: str,
         full_audio: np.ndarray | None = None,
+        session=None,
     ) -> DecodeResult:
         """Apply explicit short-utterance guidance after clip length is known.
 
@@ -1207,7 +1266,10 @@ class Server:
         """
         language_audio = audio if full_audio is None else full_audio
         return self._decode_result(
-            audio, context, self._language_for_audio(language_audio)
+            audio,
+            context,
+            self._language_for_audio(language_audio),
+            session=session,
         )
 
     def _decode_final(self, audio: np.ndarray, context: str) -> str:
@@ -1222,6 +1284,7 @@ class Server:
         preview_context: str | None = None,
         force_automatic_language: bool = False,
         language_audio: np.ndarray | None = None,
+        session=None,
     ) -> tuple[DecodeResult, str | None]:
         """Verify generated context words against an unprompted decode.
 
@@ -1231,8 +1294,21 @@ class Server:
 
         ``language_audio`` is the uncompressed buffer when ``audio`` had its
         pauses or edge silence shrunk, so the short-clip language choice
-        matches the prompted decode it is checking.
+        matches the prompted decode it is checking. ``session`` is the model
+        that produced ``result``; the unbiased decode must use the same one so
+        the two transcripts align word for word.
         """
+        if self._is_promptless(session):
+            # The decode was never prompted, so there is no prompted word to
+            # verify and a second decode would only repeat the first. Only
+            # the spelling of a clear vocabulary variant is restored.
+            canonical = canonicalize_context_variants(result.text, context)
+            if canonical != result.text:
+                return DecodeResult(
+                    canonical,
+                    result.language,
+                ), "context-variant-canonicalized"
+            return result, None
         if not transcript_contains_context_word(result.text, context):
             canonical = canonicalize_context_variants(result.text, context)
             if canonical != result.text:
@@ -1262,6 +1338,7 @@ class Server:
                     audio if language_audio is None else language_audio
                 ),
                 use_learned_context=False,
+                session=session,
             )
         except Exception as error:
             print(
@@ -1419,6 +1496,38 @@ class Server:
         finally:
             self._model_busy_since = None
         self._preroll_ms = int((time.perf_counter() - started) * 1000)
+
+    def _wake_final_model(self) -> None:
+        """Page an idle final model back in while the user is still speaking.
+
+        Runs on the preview thread between two previews, so it never overlaps
+        another decode. It costs one short decode, and only when the final
+        model has not run for FINAL_MODEL_IDLE_WAKE_SEC.
+        """
+        final_session = getattr(self, "final_session", None)
+        if final_session is None or not self.active:
+            return
+        idle = time.perf_counter() - getattr(self, "_final_session_used_at", float("-inf"))
+        if idle < FINAL_MODEL_IDLE_WAKE_SEC:
+            return
+        started = time.perf_counter()
+        try:
+            self._decode_result(
+                np.zeros(int(PREROLL_SEC * SAMPLE_RATE), dtype=np.float32),
+                "",
+                use_learned_context=False,
+                session=final_session,
+            )
+        except Exception as e:  # noqa: BLE001 - a failed wake must never surface
+            self._final_session_used_at = time.perf_counter()
+            print(f"[asr] final model wake failed: {e}", file=sys.stderr, flush=True)
+            return
+        print(
+            f"[asr] final model wake: {int((time.perf_counter() - started) * 1000)}ms "
+            f"after {int(min(idle, 99999))}s idle",
+            file=sys.stderr,
+            flush=True,
+        )
 
     def _watch_warming(self, utterance: int) -> None:
         """Tell the app whenever a cold model holds back the first preview."""
@@ -1591,6 +1700,8 @@ class Server:
                 decode_seconds = 0.0
                 last_preview_empty = False
 
+            self._wake_final_model()
+
             cooldown = preview_cooldown(
                 full_len / SAMPLE_RATE,
                 decode_seconds,
@@ -1618,6 +1729,14 @@ class Server:
         self._last_warm = now
         try:
             self._decode_preview(np.zeros(int(0.5 * SAMPLE_RATE), dtype=np.float32), "")
+            final_session = getattr(self, "final_session", None)
+            if final_session is not None:
+                self._decode_result(
+                    np.zeros(int(0.5 * SAMPLE_RATE), dtype=np.float32),
+                    "",
+                    use_learned_context=False,
+                    session=final_session,
+                )
         except Exception as e:  # noqa: BLE001 - a failed warm must never surface
             print(f"[asr] warm failed: {e}", file=sys.stderr, flush=True)
             return
@@ -1737,6 +1856,11 @@ class Server:
         # no such rule: reuse is already limited to a MAX_SILENT_REUSE_TAIL
         # tail, far below the length at which the model starts inventing.
         preview_reusable = not pause_compressed and not lead_trimmed
+        # A separate final model is the whole point of the final pass: a
+        # preview from the fast model must never stand in for it.
+        final_session = getattr(self, "final_session", None)
+        if final_session is not None:
+            preview_reusable = False
 
         # Fastest path: a previously completed preview already contains the
         # whole utterance (or differs only by a short stable silence tail). Emit
@@ -1806,7 +1930,7 @@ class Server:
         inference_started = time.perf_counter()
         try:
             result = self._decode_final_result(
-                decode_audio, context, full_audio=audio
+                decode_audio, context, full_audio=audio, session=final_session
             )
             # Automatic language detection must preserve intentional mixed
             # speech. Script counts cannot distinguish it from a translation;
@@ -1819,10 +1943,15 @@ class Server:
                 result,
                 preview_context,
                 language_audio=audio,
+                session=final_session,
             )
             review = None
+            # The stabilizer holds the fast model's previews. Asking about
+            # every word the final model hears differently would turn most
+            # dictations into a question, so that mode asks nothing.
             if (
-                self._language_for_audio(audio) is None
+                final_session is None
+                and self._language_for_audio(audio) is None
                 and context_check not in {"context-check-error", "context-check-unresolved"}
             ):
                 # The complete decode is authoritative. The stabilizer may
@@ -1837,6 +1966,8 @@ class Server:
             return
         inference_ms = int((time.perf_counter() - inference_started) * 1000)
         mode = "fresh-final"
+        if final_session is not None:
+            mode += "-final-model"
         if pause_compressed:
             mode += "-pause-compressed"
         if lead_trimmed or tail_trimmed:
@@ -1873,6 +2004,7 @@ def main() -> int:
             short_utterance_language,
             engine=engine,
             learned_context=os.environ.get("WHISPR_LEARNED_CONTEXT", ""),
+            final_model_id=os.environ.get("WHISPR_FINAL_MODEL", ""),
         )
     except Exception as e:
         emit({"type": "error", "message": f"load: {e}"})
