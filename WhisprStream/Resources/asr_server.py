@@ -15,6 +15,13 @@ Final passes re-decode the complete utterance (RTF ~0.024 at 8-bit), preserving
 zh/en code-switching. Long live previews use a bounded recent window so they do
 not compete with another full-length pass. Token agreement protects settled
 words from a single conflicting pass while allowing confirmed corrections.
+
+Starting the engine never downloads or replaces model weights: it loads the
+complete snapshot already installed (see asr_engine.build_session) with the
+Hugging Face client forced offline, and reports a missing or partly
+downloaded model as a `load:` error. Downloads are model_download.py's job.
+A developer running this by hand with an uncached model can set
+WHISPR_ALLOW_MODEL_DOWNLOAD=1 to let it download the model.
 """
 
 from __future__ import annotations
@@ -2123,6 +2130,13 @@ class Server:
 
 
 def main() -> int:
+    # Before anything imports huggingface_hub (it reads HF_HUB_OFFLINE once,
+    # at import): every launcher of this script stays off the Hub.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from asr_engine import configure_hub_environment
+
+    configure_hub_environment()
+
     model_id = os.environ.get("WHISPR_MODEL", "Qwen/Qwen3-ASR-0.6B")
     engine = os.environ.get("WHISPR_ENGINE", "qwen3")
     bits = int(os.environ.get("WHISPR_BITS", "8"))
