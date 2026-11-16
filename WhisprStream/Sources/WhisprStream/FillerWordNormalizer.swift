@@ -55,6 +55,15 @@ enum FillerWordNormalizer {
         ".", "!", "?", "…", "。", "！", "？"
     ]
 
+    /// Marks that cannot sensibly stand next to each other once the
+    /// hesitation between them is gone.
+    private static let seamMarks: Set<Character> = commas
+        .union(sentenceTerminators)
+        .union([":", "：", ";", "；"])
+
+    /// Full-width marks carry their own spacing; no space follows them.
+    private static let fullWidthMarks: Set<Character> = ["，", "、", "。", "！", "？", "：", "；"]
+
     /// English words a sentence cannot end on, as written in lowercase: a
     /// capital `A` is a name (`option A.`, `vitamin A.`). `for`, `with`,
     /// `that` and similar can end one (`what for.`), so they are left out.
@@ -94,13 +103,15 @@ enum FillerWordNormalizer {
             // `the. Um. Uh, export`: once the first hesitation rejoined the
             // sentence, the one right after it does not open a new one.
             let continuesRejoin = rejoined && removal.range.lowerBound == cursor
-            appendSegment(text[cursor..<removal.range.lowerBound], to: &result, capitalizing: capitalizeNext)
+            let segment = text[cursor..<removal.range.lowerBound]
+            appendSegment(cursor == text.startIndex ? segment : closeSeam(&result, before: segment),
+                          to: &result, capitalizing: capitalizeNext)
             result += removal.joiner
             cursor = removal.range.upperBound
             capitalizeNext = removal.capitalizesNextWord && !continuesRejoin
             rejoined = removal.rejoinsSentence || continuesRejoin
         }
-        appendSegment(text[cursor...], to: &result, capitalizing: capitalizeNext)
+        appendSegment(closeSeam(&result, before: text[cursor...]), to: &result, capitalizing: capitalizeNext)
 
         // A dictation made only of hesitations has nothing left to insert.
         guard result.contains(where: { $0.isLetter || $0.isNumber }) else { return "" }
@@ -138,7 +149,8 @@ enum FillerWordNormalizer {
             guard let tier = latinFillers[word.lowercased()],
                   !isJoinedToWord(before: start, in: text),
                   !isJoinedToWord(after: index, in: text),
-                  !isAcronym(word)
+                  !isAcronym(word),
+                  tier == .always || !isExclaimedOrAsked(after: index, in: text)
             else { continue }
             tokens.append(Token(
                 range: start..<index,
@@ -166,8 +178,18 @@ enum FillerWordNormalizer {
                text[text.index(before: range.lowerBound)].isLetter,
                !followsOpenConnective(range.lowerBound, in: text) { return nil }
             if range.upperBound < text.endIndex, text[range.upperBound].isLetter { return nil }
+            if isExclaimedOrAsked(after: range.upperBound, in: text) { return nil }
         }
         return Token(range: range, tier: tier, isCapitalized: false)
+    }
+
+    /// The engine writes `！` or `？` only when the word was said with force
+    /// or rising pitch: `啊！我给忘了` is a real interjection and `啊？` is
+    /// "huh?", not a hesitation. A pause is written with a comma or period.
+    private static let interjectionMarks: Set<Character> = ["!", "！", "?", "？"]
+
+    private static func isExclaimedOrAsked(after index: String.Index, in text: String) -> Bool {
+        nextNonWhitespace(from: index, in: text).map { interjectionMarks.contains(text[$0]) } ?? false
     }
 
     /// Adjacent fillers separated only by spaces or commas (`um, ah,`) are
@@ -330,10 +352,38 @@ enum FillerWordNormalizer {
         let left = text[text.index(before: start)]
         let right = text[end]
         guard !left.isWhitespace, !right.isWhitespace,
-              !commas.contains(left), !sentenceTerminators.contains(right),
+              !commas.contains(left), !fullWidthMarks.contains(left),
+              !sentenceTerminators.contains(right),
               removed.contains(where: \.isWhitespace)
         else { return "" }
         return " "
+    }
+
+    /// A removed hesitation can leave the mark before it facing the mark
+    /// after it: `情况，呃：它` would become `情况，：它`. A comma gives way
+    /// to anything stronger; otherwise the mark that closed the real speech
+    /// (the left one) stays and the hesitation's own mark goes.
+    private static func closeSeam(_ result: inout String, before segment: Substring) -> Substring {
+        let head = segment.prefix(while: seamMarks.contains)
+        guard !head.isEmpty else { return segment }
+
+        var marksEnd = result.endIndex
+        while marksEnd > result.startIndex, result[result.index(before: marksEnd)].isWhitespace {
+            marksEnd = result.index(before: marksEnd)
+        }
+        var marksStart = marksEnd
+        while marksStart > result.startIndex, seamMarks.contains(result[result.index(before: marksStart)]) {
+            marksStart = result.index(before: marksStart)
+        }
+        let tail = result[marksStart..<marksEnd]
+        guard !tail.isEmpty else { return segment }
+
+        if tail.allSatisfy(commas.contains), !head.allSatisfy(commas.contains) {
+            result.removeSubrange(marksStart...)
+            return segment
+        }
+        result.removeSubrange(marksEnd...)
+        return segment.dropFirst(head.count)
     }
 
     private static func appendSegment(_ segment: Substring, to result: inout String, capitalizing: Bool) {
