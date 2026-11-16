@@ -208,15 +208,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             scheduleInitialUpdateCheck()
         }
 
+        // System Settings can change the login item behind our back, so the
+        // stored preference follows the system instead of fighting it. Sync
+        // before installing the hook so launch never re-applies a no-op.
+        syncLaunchAtLoginFromSystem()
         settings.onLaunchAtLoginChange = { [weak self] in
             // Apply outside didSet: a nested set inside the observer would
             // skip it, which matters when the system rejects the change and
             // the preference has to revert.
             Task { @MainActor in self?.applyLaunchAtLoginPreference() }
         }
-        // System Settings can change the login item behind our back, so the
-        // stored preference follows the system at launch instead of fighting it.
-        settings.launchAtLogin = LaunchAtLogin.isEnabled
     }
 
     private func mergeCrossBuildContentIfNeeded() {
@@ -243,6 +244,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // permission-skip path and is retried here.
         presentFirstDictationCoachIfReady()
         refreshStatusMenu()
+        // The same return trip is when a login item toggled in System Settings
+        // becomes visible to us.
+        syncLaunchAtLoginFromSystem()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -650,13 +654,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .target = self
         menu.addItem(withTitle: "Setup Guide…", action: #selector(openOnboarding), keyEquivalent: "")
             .target = self
-        let launchAtLoginItem = menu.addItem(
-            withTitle: "Open at Login",
-            action: #selector(toggleLaunchAtLogin),
-            keyEquivalent: ""
-        )
-        launchAtLoginItem.target = self
-        launchAtLoginItem.state = LaunchAtLogin.isEnabled ? .on : .off
         menu.addItem(withTitle: "About WhisprStream", action: #selector(openAbout), keyEquivalent: "")
             .target = self
         menu.addItem(.separator())
@@ -686,20 +683,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openOnboarding() { showOnboarding() }
 
-    @objc private func toggleLaunchAtLogin() {
-        settings.launchAtLogin.toggle()
+    private func syncLaunchAtLoginFromSystem() {
+        let enabled = LaunchAtLogin.isEnabled
+        if settings.launchAtLogin != enabled { settings.launchAtLogin = enabled }
     }
 
     private func applyLaunchAtLoginPreference() {
         guard LaunchAtLogin.isEnabled != settings.launchAtLogin else { return }
-        if LaunchAtLogin.setEnabled(settings.launchAtLogin) {
-            refreshStatusMenu()
-            return
-        }
+        if LaunchAtLogin.setEnabled(settings.launchAtLogin) { return }
+        // Keep the toggle honest when the system rejects the change, and do
+        // it before the alert so the toggle is not wrong while the alert is up.
+        syncLaunchAtLoginFromSystem()
         presentLaunchAtLoginError()
-        // Keep the toggle honest when the system rejects the change.
-        settings.launchAtLogin = LaunchAtLogin.isEnabled
-        refreshStatusMenu()
     }
 
     private func presentLaunchAtLoginError() {

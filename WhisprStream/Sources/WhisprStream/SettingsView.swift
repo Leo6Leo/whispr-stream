@@ -312,10 +312,6 @@ private struct GeneralTab: View {
                 }
             } header: {
                 Text("Startup")
-            } footer: {
-                Text("You can also change this in System Settings › General › Login Items.")
-                    .foregroundStyle(.secondary)
-                    .font(.callout)
             }
 
             Section {
