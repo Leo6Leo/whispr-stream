@@ -87,6 +87,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusUpdateDot: StatusUpdateDotView?
     private var updateStatusObservation: AnyCancellable?
     private var launchReadinessObservation: AnyCancellable?
+    private var engineHealthObservation: AnyCancellable?
+    private var isShowingEngineRepairAlert = false
+    private var promptedEngineRepairReason: String?
     private var periodicUpdateTimer: Timer?
     private var initialUpdateCheckWork: DispatchWorkItem?
     private let capture = AudioCapture()
@@ -206,8 +209,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     DispatchQueue.main.async { self.resumeLaunchAfterRuntimeCheck() }
                 }
         } else {
-            presentSetup()
+            presentSetupUnlessEngineNeedsRepair()
         }
+        observeEngineHealth()
 
         if settings.hasCompletedOnboarding {
             scheduleInitialUpdateCheck()
@@ -260,6 +264,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         periodicUpdateTimer?.invalidate()
         updateStatusObservation?.cancel()
         launchReadinessObservation?.cancel()
+        engineHealthObservation?.cancel()
         stopCapture()
         state.stopDictationTimer()
         hotkey?.stop()
@@ -288,7 +293,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if runtime.isReady, ModelCatalog.state(for: settings.model).isInstalled {
             beginOnboardedSession()
         } else {
-            presentSetup()
+            presentSetupUnlessEngineNeedsRepair()
+        }
+    }
+
+    /// After setup, an engine that is not usable belongs to the health
+    /// observer: it raises the repair alert, or starts the engine once a
+    /// check or repair succeeds. That includes a check still in flight;
+    /// Engine settings re-runs it, and reading that as "not broken" here
+    /// reopened the whole guide behind the alert. The guide remains the
+    /// path for a missing model.
+    private func presentSetupUnlessEngineNeedsRepair() {
+        if settings.hasCompletedOnboarding, !runtime.isDeveloperTestMode, !runtime.isReady { return }
+        presentSetup()
+    }
+
+    // MARK: - Engine health
+
+    /// Watches the engine for the whole session: a failed health check at
+    /// launch, or an integrity failure found when dictation starts, raises
+    /// one alert; a finished repair starts the engine without a relaunch.
+    private func observeEngineHealth() {
+        var previous: RuntimeManager.Phase?
+        engineHealthObservation = runtime.$phase
+            .removeDuplicates()
+            .sink { [weak self] phase in
+                let before = previous
+                previous = phase
+                // @Published emits from willSet; act after the commit.
+                DispatchQueue.main.async { self?.engineHealthChanged(from: before, to: phase) }
+            }
+    }
+
+    private func engineHealthChanged(from previous: RuntimeManager.Phase?, to phase: RuntimeManager.Phase) {
+        guard settings.hasCompletedOnboarding, !runtime.isDeveloperTestMode else { return }
+        if phase == .ready {
+            promptedEngineRepairReason = nil
+            if previous != nil, asr == nil, runtime.isReady {
+                if ModelCatalog.state(for: settings.model).isInstalled {
+                    Log.write("speech engine became ready; starting it")
+                    startSpeechEngine()
+                } else {
+                    presentSetup()
+                }
+            }
+            return
+        }
+        guard RuntimeManager.shouldPromptForRepair(from: previous, to: phase),
+              let reason = phase.repairReason,
+              // Opening Engine settings re-runs the check and lands on the
+              // same failure; ask once until the engine has worked again.
+              reason != promptedEngineRepairReason else { return }
+        promptedEngineRepairReason = reason
+        presentEngineRepairAlert(reason: reason)
+    }
+
+    private func presentEngineRepairAlert(reason: String) {
+        guard !isShowingEngineRepairAlert else { return }
+        isShowingEngineRepairAlert = true
+        defer { isShowingEngineRepairAlert = false }
+        Log.write("speech engine needs repair: \(reason)")
+
+        let alert = NSAlert()
+        alert.messageText = "The Speech Engine Needs Repair"
+        alert.informativeText = reason
+            + "\n\nDictation is unavailable until it is repaired. Your model, settings, and vocabulary are kept."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Repair…")
+        alert.addButton(withTitle: "Not Now")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            windows.showSettings(settings, runtime: runtime, updates: updates, section: .engine)
         }
     }
 

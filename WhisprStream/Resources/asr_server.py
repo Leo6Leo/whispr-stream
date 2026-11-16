@@ -422,6 +422,14 @@ class PreviewStabilizer:
             self.raw, self.raw_support = incoming, raw_support
         self.start, self.end, self.revision = start, end, revision
         selected_text = "".join(selected)
+        # A dispute that differs only in spacing, casing, punctuation or a
+        # homophone pronoun is not worth a question: keep the selected word
+        # and drop it from the set. Every remaining choice is still expressed
+        # against the full selected_text, so the set stays self-consistent.
+        disputes = [
+            dispute for dispute in disputes
+            if not review_choice_is_moot(dispute[1], dispute[2])
+        ]
         # Ask only about bounded lexical substitutions. Punctuation, omissions,
         # whole-sentence rewrites and ambiguous alignments are not useful word
         # choices; one such dispute, or too many disputes, means no question.
@@ -472,6 +480,36 @@ def normalized_context_text(text: str) -> str:
     """Return a punctuation/spacing-insensitive form for context checks."""
     normalized = unicodedata.normalize("NFKC", text).casefold()
     return "".join(character for character in normalized if character.isalnum())
+
+
+# Mandarin third-person pronouns all sound like "tā"; audio cannot choose
+# among them, so a review must never ask about that difference alone.
+HOMOPHONE_PRONOUNS = str.maketrans({c: "他" for c in "她它牠祂"})
+
+
+def moot_review_key(text: str) -> str:
+    """Letters/digits only, case folded, homophone pronouns read as 他.
+
+    Mirrors ``DictationReview.comparisonKey`` in DictationReview.swift.
+    """
+    return normalized_context_text(text).translate(HOMOPHONE_PRONOUNS)
+
+
+def review_choice_is_moot(preferred: str, alternative: str) -> bool:
+    """True when two options differ only in spacing, casing, punctuation or a
+    homophone pronoun (``back end``/``Backend``, ``Uh,``/``uh``, 他/她)."""
+    key = moot_review_key(preferred)
+    return bool(key) and key == moot_review_key(alternative)
+
+
+def learnable_context(text: str) -> str:
+    """Drop everyday words from learned hints (defence in depth; the app
+    already filters them). ``the`` as a decoder bias has become ``OAuth``."""
+    return "\n".join(
+        line for line in text.splitlines()
+        if len(normalized_context_text(line)) >= 2
+        and not is_common_english_word(line)
+    )
 
 
 def comparable_context_terms(context: str) -> list[str]:
@@ -1068,7 +1106,7 @@ class Server:
 
         self.lock = threading.Lock()
         self.context = context
-        self.learned_context = learned_context
+        self.learned_context = learnable_context(learned_context)
         self.short_utterance_language = normalize_short_utterance_language(
             short_utterance_language
         )
@@ -1660,6 +1698,7 @@ class Server:
                 self._context_revision += 1
 
     def set_learned_context(self, text: str) -> None:
+        text = learnable_context(text)
         with self.lock:
             if text != self.learned_context:
                 self.learned_context = text

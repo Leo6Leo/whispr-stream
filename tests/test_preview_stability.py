@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "WhisprStream" / "Resources"))
-from asr_server import PreviewStabilizer  # noqa: E402
+from asr_server import PreviewStabilizer, review_choice_is_moot  # noqa: E402
 
 
 class PreviewStabilityTests(unittest.TestCase):
@@ -171,6 +171,39 @@ class PreviewStabilityTests(unittest.TestCase):
             [("Use ", "Codex", "Codec", " and Vim"), ("Use Codex and ", "Vim", "Emacs", "")],
         )
         self.assertEqual(review.text, "Use Codex and Vim")
+
+    def test_spacing_casing_punctuation_and_pronoun_choices_are_moot(self):
+        # Pairs from 154 real prompts that offered no real choice.
+        for preferred, alternative in (
+            ("Backend", "back end"), ("codebase", "code base"), ("dropdown", "drop down"),
+            ("timestamp", "time stamp"), ("ChatGPT", " Chat GPT "), ("APP", " A P P"),
+            ("Uh,", "uh"), ("testing", "Testing."), ("他", "她"), ("它", "他"),
+            ("她们", "他们"), ("祂", "牠"),
+        ):
+            with self.subTest(preferred=preferred, alternative=alternative):
+                self.assertTrue(review_choice_is_moot(preferred, alternative))
+        for preferred, alternative in (
+            ("Codex", "codecs"), ("Claude", "cloth"), ("他", "那"), ("它它", "它"),
+            (",", "。"), ("add", "at"),
+        ):
+            with self.subTest(preferred=preferred, alternative=alternative):
+                self.assertFalse(review_choice_is_moot(preferred, alternative))
+
+    def test_moot_disagreements_do_not_ask(self):
+        for old, new in (
+            ("Open the drop down menu", "Open the dropdown menu"),
+            ("我觉得他说得对", "我觉得她说得对"),
+        ):
+            with self.subTest(old=old):
+                self.assertIsNone(self.held(old, new))
+
+    def test_moot_disagreement_is_dropped_while_real_ones_are_asked(self):
+        review = self.held("Use back end and Vim", "Use Backend and Emacs")
+        self.assertEqual(
+            [(c.prefix, c.preferred, c.alternative, c.suffix) for c in review.choices],
+            [("Use back end and ", "Vim", "Emacs", "")],
+        )
+        self.assertEqual(review.text, "Use back end and Vim")
 
     def test_too_many_disagreements_read_as_a_rewrite(self):
         self.assertIsNone(self.held("Open Codex with Vim on Linux today",

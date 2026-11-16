@@ -42,6 +42,40 @@ struct DictationReviewChecks {
         let crowded: [[String: String]] = [first, second, fourth, fourth]
         check(DictationReview.parseAll(crowded, single: nil, transcript: sentence).isEmpty, "too many words is not a question")
         check(several.allSatisfy { $0.term(in: $0.alternativeText) == $0.alternative }, "each word stays learnable on its own")
+        for (preferred, alternative) in [("Backend", "back end"), ("ChatGPT", " Chat GPT "), ("Uh,", "uh"),
+                                         ("testing", "Testing."), ("他", "她"), ("它", "他"), ("她们", "他们")] {
+            let moot: [String: String] = ["prefix": "x ", "preferred": preferred, "alternative": alternative, "suffix": " y"]
+            check(DictationReview.parse(moot, transcript: "x \(preferred) y") == nil, "no question for \(preferred)|\(alternative)")
+        }
+        check(!DictationReview.isMoot("Codex", "codecs") && !DictationReview.isMoot("他", "那")
+              && !DictationReview.isMoot(",", "。"), "real choices stay askable")
+        let spaced = "Use back end and Vim"
+        let mootWord: [String: String] = ["prefix": "Use ", "preferred": "back end", "alternative": "Backend",
+                                          "suffix": " and Vim"]
+        let realWord: [String: String] = ["prefix": "Use back end and ", "preferred": "Vim", "alternative": "Emacs",
+                                          "suffix": ""]
+        let kept = DictationReview.parseAll([mootWord, realWord], single: nil, transcript: spaced)
+        check(kept.map(\.preferred) == ["Vim"], "a moot word is dropped and the real one is still asked")
+        check(DictationReview.compose(kept, alternatives: [true]) == "Use back end and Emacs", "dropped word keeps its selection")
+        check(DictationReview.parseAll([mootWord], single: nil, transcript: spaced).isEmpty, "only moot words ask nothing")
+        check(CorrectionStore.isEverydayWord("The") && CorrectionStore.isEverydayWord("add")
+              && CorrectionStore.isEverydayWord("它它") && CorrectionStore.isEverydayWord("他们")
+              && !CorrectionStore.isEverydayWord("Codex") && !CorrectionStore.isEverydayWord("Claude")
+              && !CorrectionStore.isEverydayWord("省电"), "everyday words are not vocabulary")
+        let junkURL = FileManager.default.temporaryDirectory.appendingPathComponent("whispr-junk-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: junkURL) }
+        let junk = CorrectionStore(url: junkURL)
+        let addOrAt = DictationReview(prefix: "Please ", preferred: "add", alternative: "at", suffix: " it.")
+        let theOrA = DictationReview(prefix: "Open ", preferred: "the", alternative: "a", suffix: " file.")
+        let pronoun = DictationReview(prefix: "我觉得", preferred: "它", alternative: "他", suffix: "说得对")
+        let cloth = DictationReview(prefix: "Ask ", preferred: "cloth", alternative: "Claude", suffix: " now.")
+        for _ in 0..<2 {
+            junk.record(addOrAt, chosenText: addOrAt.recommendedText, model: "test", manual: false)
+            junk.record(theOrA, chosenText: theOrA.recommendedText, model: "test", manual: false)
+            junk.record(pronoun, chosenText: pronoun.recommendedText, model: "test", manual: false)
+            junk.record(cloth, chosenText: cloth.alternativeText, model: "test", manual: false)
+        }
+        check(junk.preferredTerms == ["Claude"], "only real terms are learned from repeated choices")
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("whispr-choice-checks-\(UUID())")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }

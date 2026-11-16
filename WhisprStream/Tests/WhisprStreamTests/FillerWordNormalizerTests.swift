@@ -96,6 +96,22 @@ final class FillerWordNormalizerTests: XCTestCase {
         assertNormalized("这个额度不够，额外再加一点。", "这个额度不够，额外再加一点。")
     }
 
+    func testKeepsExclaimedAndQuestioningInterjections() {
+        // Field report: the user typed this 啊！ back after it was removed.
+        assertNormalized("啊！我给忘了你是 Team Plan。", "啊！我给忘了你是 Team Plan。")
+        assertNormalized("啊？你说什么？", "啊？你说什么？")
+        assertNormalized("嗯？怎么了", "嗯？怎么了")
+        assertNormalized("我看到了。额！又错了。", "我看到了。额！又错了。")
+        assertNormalized("Ah! I forgot.", "Ah! I forgot.")
+        assertNormalized("Ah ? What happened", "Ah ? What happened")
+        // Only the hesitation next to the interjection goes.
+        assertNormalized("呃，啊！我给忘了", "啊！我给忘了")
+        // A pause is still a pause, and the always tier is unaffected.
+        assertNormalized("啊，我给忘了。", "我给忘了。")
+        assertNormalized("我看到了。啊。然后呢", "我看到了。然后呢")
+        assertNormalized("Um! I forgot.", "I forgot.")
+    }
+
     func testKeepsWordsThatOnlyLookLikeFillers() {
         assertNormalized("Bring an umbrella.", "Bring an umbrella.")
         assertNormalized("Uh-oh, that broke.", "Uh-oh, that broke.")
@@ -166,6 +182,14 @@ final class FillerWordNormalizerTests: XCTestCase {
         let text = "你帮我检查一下，这个软件没有什么漏洞吧？就他有没有Backdoor。"
         assertNormalized(text, text)
         assertNormalized("", "")
+    }
+
+    func testDoesNotLeaveTwoMarksFacingEachOther() {
+        assertNormalized("就会出现这样的情况，呃：它会翻译成数字", "就会出现这样的情况：它会翻译成数字")
+        assertNormalized("这样的情况：呃。嗯，它会翻译成数字", "这样的情况：它会翻译成数字")
+        assertNormalized("这样的情况：Um, 它会翻译成数字", "这样的情况：它会翻译成数字")
+        assertNormalized("Here is the list: um. First, apples", "Here is the list: First, apples")
+        assertNormalized("这个方案，呃。我觉得可以", "这个方案。我觉得可以")
     }
 
     func testIsIdempotent() {
