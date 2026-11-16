@@ -360,6 +360,28 @@ final class RuntimeManager: ObservableObject {
         case verifying
         case installing
         case failed(String)
+
+        /// Why an installed engine cannot be used as it is, or nil when it
+        /// works or an install is under way.
+        var repairReason: String? {
+            switch self {
+            case .missing: "The speech engine is not installed."
+            case let .incompatible(reason), let .failed(reason): reason
+            default: nil
+            }
+        }
+    }
+
+    /// Whether a phase change should interrupt someone who already finished
+    /// setup: the engine went from working (or being checked) to needing a
+    /// repair. Failures that end an install the user is watching are shown
+    /// inline by the installer UI and must not also raise an alert.
+    static func shouldPromptForRepair(from previous: Phase?, to current: Phase) -> Bool {
+        guard current.repairReason != nil else { return false }
+        switch previous {
+        case nil, .ready, .checking: return true
+        default: return false
+        }
     }
 
     @Published private(set) var phase: Phase = .missing
