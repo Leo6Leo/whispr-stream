@@ -497,8 +497,13 @@ private struct ModelTab: View {
                            value: settings.isReloadingModel)
             }
             Section {
-                Toggle("Use the 1.7B model for the final text", isOn: $settings.largeModelForFinalText)
-                    .disabled(!canUseLargeModelForFinalText)
+                Toggle(isOn: $settings.largeModelForFinalText) {
+                    HStack(spacing: 6) {
+                        Text("Use the 1.7B model for the final text")
+                        BetaBadge()
+                    }
+                }
+                .disabled(!canUseLargeModelForFinalText)
             } footer: {
                 Text(largeModelForFinalTextHint)
                     .foregroundStyle(.secondary)
@@ -553,7 +558,7 @@ private struct ModelTab: View {
         if !installState(.large).isInstalled {
             return "Download Qwen3-ASR 1.7B above to use this."
         }
-        return "Live text stays on the fast 0.6B model; when you finish speaking, the 1.7B model writes the final text. More accurate, but the text lands a little later, may differ from the preview, and both models stay in memory (about 5 GB more). Word-choice questions are not asked in this mode."
+        return "Beta. Live text stays on the fast 0.6B model; when you finish speaking, the 1.7B model writes the final text. More accurate, but the text lands a little later, may differ from the preview, and both models stay in memory (about 5 GB more). Word-choice questions are not asked in this mode."
     }
 }
 

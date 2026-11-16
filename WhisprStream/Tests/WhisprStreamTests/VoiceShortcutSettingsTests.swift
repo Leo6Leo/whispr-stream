@@ -47,6 +47,15 @@ final class VoiceShortcutSettingsTests: XCTestCase {
         XCTAssertFalse(Settings(defaults: makeDefaults()).contextAwareCapitalization)
     }
 
+    func testLargeModelForFinalTextIsBetaAndDefaultsOff() {
+        let defaults = makeDefaults()
+        let settings = Settings(defaults: defaults)
+        XCTAssertFalse(settings.largeModelForFinalText)
+        XCTAssertNil(settings.finalTextModel)
+        settings.largeModelForFinalText = true
+        XCTAssertTrue(Settings(defaults: defaults).largeModelForFinalText)
+    }
+
     func testPlaySoundDefaultsOn() {
         XCTAssertTrue(Settings(defaults: makeDefaults()).playSound)
     }
