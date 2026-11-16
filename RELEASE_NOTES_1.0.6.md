@@ -19,6 +19,8 @@ This release redesigns Settings, adds launch at login, stops the setup guide fro
 - **No doubled punctuation after a removed hesitation.** Removing a filler could leave two marks facing each other (*情况，呃：它* became *情况，：它*). A comma now gives way to the stronger mark, and no space is added after a full-width mark.
 - **Check a word stops asking pointless questions.** A disputed word that differs only in spacing, capitalization, or punctuation (*Backend* or *back end*, *codebase* or *code base*), or only between the pronouns 他, 她, and 它, is no longer asked about; the other words in the same sentence still are. On one developer's history, that was 17 of 154 questions.
 - **Everyday words are never learned as vocabulary.** *Learn from my choices* had learned *the* and *add*. Common English words and Chinese function words are now excluded, both in the app and in the engine.
+- **Starting the engine never downloads a model.** The engine used to ask Hugging Face for the newest revision of the model on every start; if the model repository changed, it would have downloaded the whole model again during startup, with no progress or storage check. It now loads exactly the model that is installed and works with the Hub unreachable.
+- **A slow model no longer costs you the dictation.** If the engine was still busy when you finished speaking, the text was discarded after five seconds; it now waits for the engine as long as it is making progress.
 - **The General pane fits its window.** A long vocabulary list no longer pushes the pane wider than the settings window, and *Reset to Default* is no longer truncated.
 - The HUD now animates when *Listening…* becomes *Waking up the speech model…* instead of snapping to the new width.
 
