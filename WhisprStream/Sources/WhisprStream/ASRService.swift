@@ -30,6 +30,40 @@ final class ASRService {
 
     var onEvent: ((Event) -> Void)?
 
+    /// How long this sidecar may take to report ready before it is presumed
+    /// hung, sized to the weights it was actually asked to load.
+    let startupTimeout: TimeInterval
+
+    /// The default 0.6B load. This was the only budget before 1.0.6 and stays
+    /// unchanged for the default configuration.
+    static let smallModelStartupBudget: TimeInterval = 20
+    /// Any other model: the 1.7B (about 7-8 s warm on a fast Mac, roughly
+    /// three times the 0.6B weights, quantized at load) or a developer
+    /// override whose size is unknown.
+    static let otherModelStartupBudget: TimeInterval = 40
+
+    /// Startup deadline for one sidecar launch. Each model the sidecar loads
+    /// before `ready` adds its own budget, mirroring asr_server.py, which loads
+    /// a separate final-text model only when it is non-empty, differs from the
+    /// preview model and the engine is Qwen3. A sidecar that crashes is still
+    /// reported at once through `.terminated`; this only bounds a hung one.
+    static func startupTimeout(
+        model: String,
+        engine: ASREngine,
+        finalModel: String?
+    ) -> TimeInterval {
+        func budget(_ id: String) -> TimeInterval {
+            engine == .qwen3 && id == ASRModel.small.rawValue
+                ? smallModelStartupBudget
+                : otherModelStartupBudget
+        }
+        var total = budget(model)
+        if let finalModel, !finalModel.isEmpty, finalModel != model, engine == .qwen3 {
+            total += budget(finalModel)
+        }
+        return total
+    }
+
     init(
         python: URL,
         script: URL,
@@ -41,6 +75,11 @@ final class ASRService {
         learnedContext: String = "",
         finalModel: String? = nil
     ) {
+        startupTimeout = Self.startupTimeout(
+            model: model,
+            engine: engine,
+            finalModel: finalModel
+        )
         process.executableURL = python
         process.arguments = PythonProcessEnvironment.scriptArguments(script: script)
         process.standardInput = inPipe

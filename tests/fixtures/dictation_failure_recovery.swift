@@ -17,6 +17,7 @@ final class ASRService {
         case error(String), terminated(String)
     }
     var onEvent: ((Event) -> Void)?
+    let startupTimeout: TimeInterval = 20
     var shouldFailStart = false
     var shutdowns = 0, starts = 0, begins = 0, stops = 0
     func start() throws { starts += 1; if shouldFailStart { throw InjectedFailure.failed } }
