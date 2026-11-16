@@ -262,6 +262,15 @@ final class Settings: ObservableObject {
         didSet { defaults.set(playSound, forKey: Keys.playSound) }
     }
 
+    /// Start WhisprStream automatically when you log in. The system's login
+    /// item is the source of truth; the stored preference follows it at launch.
+    @Published var launchAtLogin: Bool {
+        didSet {
+            defaults.set(launchAtLogin, forKey: Keys.launchAtLogin)
+            onLaunchAtLoginChange?()
+        }
+    }
+
     /// Which sound plays around a dictation — a designed pair, or one of
     /// macOS's own alert sounds as before.
     @Published var soundTheme: SoundTheme {
@@ -487,6 +496,10 @@ final class Settings: ObservableObject {
     /// this is a sidecar startup option and therefore requires a restart.
     var onShortUtteranceLanguageChange: ((ShortUtteranceLanguage) -> Void)?
 
+    /// Fired when the launch-at-login preference changes, to apply it to the
+    /// system's login items.
+    var onLaunchAtLoginChange: (() -> Void)?
+
     private let defaults: UserDefaults
 
     private enum Keys {
@@ -514,6 +527,7 @@ final class Settings: ObservableObject {
         static let customModels = "customModels.v1"
         static let onboarded = "hasCompletedOnboarding"
         static let firstDictationCoachPending = "needsFirstDictationCoach"
+        static let launchAtLogin = "launchAtLogin"
     }
 
     init(defaults: UserDefaults = .standard) {
@@ -555,6 +569,7 @@ final class Settings: ObservableObject {
         audioSource = AudioSource(rawValue: defaults.string(forKey: Keys.audioSource) ?? "")
             ?? .microphone
         playSound = defaults.object(forKey: Keys.playSound) as? Bool ?? true
+        launchAtLogin = defaults.object(forKey: Keys.launchAtLogin) as? Bool ?? false
         // Migration: before pairs, the choice lived in `insertSound` as a bare
         // alert-sound name. Carry it over so an existing setting is preserved
         // rather than silently reset to a new default.

@@ -212,6 +212,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if settings.hasCompletedOnboarding {
             scheduleInitialUpdateCheck()
         }
+
+        // System Settings can change the login item behind our back, so the
+        // stored preference follows the system instead of fighting it. Sync
+        // before installing the hook so launch never re-applies a no-op.
+        syncLaunchAtLoginFromSystem()
+        settings.onLaunchAtLoginChange = { [weak self] in
+            // Apply outside didSet: a nested set inside the observer would
+            // skip it, which matters when the system rejects the change and
+            // the preference has to revert.
+            Task { @MainActor in self?.applyLaunchAtLoginPreference() }
+        }
     }
 
     private func mergeCrossBuildContentIfNeeded() {
@@ -238,6 +249,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // permission-skip path and is retried here.
         presentFirstDictationCoachIfReady()
         refreshStatusMenu()
+        // The same return trip is when a login item toggled in System Settings
+        // becomes visible to us.
+        syncLaunchAtLoginFromSystem()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -693,6 +707,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func openDeveloperTestSetup() { presentSetup() }
 
     @objc private func openOnboarding() { showOnboarding() }
+
+    private func syncLaunchAtLoginFromSystem() {
+        let enabled = LaunchAtLogin.isEnabled
+        if settings.launchAtLogin != enabled { settings.launchAtLogin = enabled }
+    }
+
+    private func applyLaunchAtLoginPreference() {
+        guard LaunchAtLogin.isEnabled != settings.launchAtLogin else { return }
+        if LaunchAtLogin.setEnabled(settings.launchAtLogin) { return }
+        // Keep the toggle honest when the system rejects the change, and do
+        // it before the alert so the toggle is not wrong while the alert is up.
+        syncLaunchAtLoginFromSystem()
+        presentLaunchAtLoginError()
+    }
+
+    private func presentLaunchAtLoginError() {
+        let alert = NSAlert()
+        alert.messageText = "Unable to Update Login Item"
+        alert.informativeText =
+            "You can manage login items in System Settings › General › Login Items."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Open Login Items")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn {
+            LaunchAtLogin.openSystemSettingsPane()
+        }
+    }
 
     /// Wake or unlock while idle: ask the engine for one short decode.
     @objc private func rewarmSpeechEngine() {

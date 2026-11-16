@@ -350,7 +350,7 @@ type, but module-local wins and it compiles fine.)
   into ~O(n), making long dictation flat-cost. Only matters past ~30 s utterances.
 - **Local LLM cleanup pass** (`mlx-lm`) for 的/得 homophone slips and spacing at
   script boundaries.
-- **Launch at login**, app icon (currently an SF Symbol), `SoundPlayer.playUserAlert()`
+- App icon (currently an SF Symbol), `SoundPlayer.playUserAlert()`
   is written but unwired.
 - 1.7B model was never benchmarked — its download stalled on the Xet bug. 0.6B is
   good enough that this is low priority.
