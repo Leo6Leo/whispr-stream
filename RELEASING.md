@@ -147,6 +147,102 @@ app. The `WHISPR_UPDATE_FEED_URL` override exists only in debug builds, accepts
 only loopback HTTP URLs, and is compiled out of release builds. Production
 builds continue to require HTTPS GitHub release and asset URLs.
 
+### Update an installed copy of the previous release
+
+Both harnesses above update the tree being released to itself. A user is
+updated by the app they already have: its own update code fetches, verifies,
+and stages the replacement and picks the helper. From 1.0.4 on that is the
+helper shipped inside the verified replacement, which launches the new app
+through LaunchServices; helpers before 1.0.4 spawned the new app as their
+child, which the new app repairs by relaunching itself (`UpdateRelaunch.swift`).
+`WhisprStream/test-update-from-release.sh` runs that whole path with real
+executables. Check it statically first; this takes under a second and is also
+run by `pytest tests`:
+
+```bash
+WhisprStream/test-update-from-release.sh --check
+```
+
+`--check` confirms the tools, the old tag, the runtime pins above, and that
+every log line and label the live run depends on still exists in the old tag
+and in the current tree, and prints which relaunch path the old tag implies.
+The full run takes the old tag (default `v1.0.5`) and the release candidate:
+
+```bash
+WHISPR_REPLACEMENT_APP=/path/to/signed/WhisprStream.app \
+  WhisprStream/test-update-from-release.sh v1.0.5 --prepare-only
+WHISPR_REPLACEMENT_APP=/path/to/signed/WhisprStream.app \
+  WhisprStream/test-update-from-release.sh v1.0.5
+```
+
+The script checks the tag out in a temporary git worktree and builds that
+tag's `build.sh` bundle with its debug app and debug helper swapped in (only
+debug executables honor the loopback feed and update-key overrides; the debug
+build uses `--build-system native` like `build.sh`). It gives that copy the
+release identifier `com.leoleo.whisprstream`, the tag's runtime pins, no
+development Python, an ephemeral update key, and `NSAllowsLocalNetworking`.
+Without `WHISPR_REPLACEMENT_APP` it builds the replacement from `HEAD` in a
+second worktree with the exact `RELEASE=1` command and pins from section 2.
+The replacement must have no debug feed override, contain the self-relaunch,
+and be the version and build number `build.sh` defaults to; the only change
+made to it is the ephemeral update key, which forces a re-signature with the
+same identity, entitlements, and hardened-runtime options. Both bundles are
+signed with the stable self-signed identity so existing permission grants
+apply, the signed ZIP is served from a GitHub-shaped loopback feed, and every
+build output stays under `/tmp`. `--prepare-only` stops there, downloads both
+assets back, and reports, without changing anything, whether this Mac is ready
+for the live run.
+
+The live run requires every WhisprStream instance to be quit (a second
+instance would share the trigger key, microphone, Application Support, and
+log), a `com.leoleo.whisprstream` preferences domain that has completed
+onboarding, the public speech runtime in Application Support matching the
+candidate's pinned content digest, and the selected model in the Hugging Face
+cache. The copies run under the release identifier, so they share the
+installed app's preferences: the script exports that domain, clears
+`updates.lastPromptedVersion` so the automatic prompt appears, adds a canary
+key, and on exit deletes and re-imports the export and verifies the domain is
+identical to it (if verification fails it keeps the export and prints the
+restore command). It then opens the temporary old copy through LaunchServices
+with the debug overrides passed only to that launch (`open --env`). When the
+terminal has Accessibility access it clicks **Update & Relaunch** in the
+automatic prompt through System Events, opening that prompt from the
+status-bar menu's **Update WhisprStream to …** item if the automatic one does
+not appear; otherwise choose it yourself, or pass `--manual`.
+
+It requires, from `~/Library/Logs/WhisprStream.log`: the old copy's own
+`launch: pid=N parent=1 responsible=N`; `update: verified version 1.0.6;
+terminating for replacement`; the helper's `installed update at` the temporary
+install; no failure line; and the surviving instance's
+`launch: pid=N parent=1 responsible=N`. For an old tag of 1.0.4 or later no
+`update relaunch:` line may appear; for an older tag the log must show
+`update relaunch: spawned as a child of helper` and
+`update relaunch: new instance pid=` naming the surviving process. It also
+requires exactly one WhisprStream process, running the installed copy, with
+launchd as its parent, no helper running and no process of the old instance
+left over (such as its speech sidecar), LaunchServices reporting that process
+as `com.leoleo.whisprstream` build 10 at the temporary install, the installed
+bundle byte-identical to the served replacement with a valid signature, the
+helper binary seen in the installer directory being the expected one (when it
+is observed), no `.WhisprStream.update-*` bundle beside the install, and no
+new `WhisprStream-installer-*` or `WhisprStream-update-*` directory. For the
+user's data it requires every preference the old version had to be present and
+unchanged (vocabulary and voice shortcuts may only gain entries from the
+cross-build merge; the canary must survive), no file in
+`~/Library/Application Support/WhisprStream` to have disappeared, the speech
+runtime's content digest to be unchanged and equal to the one the new version
+pins, and the selected model's cache to be unchanged. The worktrees and every
+temporary file are removed on exit, and `/Applications`, the repository app,
+the `dev.local.whisprstream` domain, and TCC are never touched.
+`--leave-running` keeps the updated app for a dictation check. The run takes
+several minutes, mostly the two builds of the old tag.
+
+Run it before publishing any release, because every release is an update for
+the installed base, and again whenever the updater, its helper, launch code,
+signing, or bundle identifiers change. For the final candidate pass the signed
+app as `WHISPR_REPLACEMENT_APP` so the log lines come from the build that
+ships. Pass an older tag, such as `v1.0.3`, to exercise the self-relaunch path.
+
 ## 3. Stable self-signing
 
 Create one certificate using [`make-signing-cert.md`](WhisprStream/make-signing-cert.md), keep its private key outside the repository, and back it up securely. Reuse the same identity for every release; losing the key changes the app's code identity and may require permissions to be granted again.
@@ -171,6 +267,8 @@ Then download both assets back from GitHub and verify their hashes. Before publi
 - offline, insufficient-space, cancelled-download, checksum-failure, partial-model-cleanup, permission-skip, and update scenarios.
 
 Record failure-state screenshots and logs. Verify that an app replacement preserves the runtime, model cache, and permissions; document any Accessibility re-grant honestly if macOS requires it.
+
+Before the manual clean-Mac pass, run `WhisprStream/test-first-install-e2e.sh` from the repository root (set `PYTEST` to a pytest with the test dependencies, and pass the directory of the assets downloaded back from the draft release if they are not in the root). It verifies `SHA256SUMS` and runs `validate-release.sh`. It extracts a quarantined, browser-style copy of the app ZIP and checks its pinned signature, hardened runtime, Gatekeeper assessment and runtime pins. It installs the real runtime ZIP into an empty temporary Application Support with the app's own installer, including checksum, truncation, content-digest, failed-repair and 48 MB-volume insufficient-space failures, and a health check under a poisoned `PYTHONPATH`/`PYTHONHOME`/venv/conda environment. It then runs the candidate's bundled model helper and speech engine from that runtime: a loopback Hugging Face download, cancel and partial cleanup, offline, Hub outage and insufficient-space cases, and an offline model load and transcription when the Qwen3-ASR-0.6B cache exists. Add `WHISPR_E2E_NETWORK=1` to confirm the pinned runtime URL is published with the pinned size. The script never launches the candidate, touches `/Applications`, TCC, or the real preferences, runtime, log or model cache; `WHISPR_E2E_LAUNCH=1` additionally launches an ad-hoc re-signed clone with a unique bundle id against an empty home (it takes keyboard focus). A passing run replaces the poisoned-environment, offline, insufficient-space, cancelled-download, checksum-failure and partial-model-cleanup checks on this Mac. It does not replace Gatekeeper's **Open Anyway** flow, the native microphone, Accessibility and Screen & System Audio Recording prompts on an account with no prior grant, a real microphone dictation, permission skip, app replacement, macOS 14, or 8 GB hardware; those remain manual as listed in this section.
 
 On a fresh macOS user account with no previous microphone grant, explicitly verify:
 
@@ -237,13 +335,19 @@ Also exercise these dictation regressions with the built candidate:
   probing, and final paste. The badge may update immediately, but the automatic
   window must wait until dictation and clipboard cleanup finish, then appear
   once. Include rapid consecutive dictations while an update is pending.
-- Update an installed 1.0.3 copy with **Install and Relaunch**. The 1.0.3
-  helper spawns the new app as its child, so the log must show
-  `update relaunch: spawned as a child of helper` followed by
-  `update relaunch: new instance pid=`, and the first dictation afterwards
-  must capture audio without quitting and reopening by hand. The relaunched
-  process's `launch:` line must report `responsible=` equal to its own pid.
-  An update performed by the 1.0.4 helper (LaunchServices) must not relaunch.
+- Update an installed copy of the previous public release (1.0.5) to the
+  candidate through the in-app updater with
+  `WHISPR_REPLACEMENT_APP=<candidate> WhisprStream/test-update-from-release.sh v1.0.5 --leave-running`
+  (see "Update an installed copy of the previous release"). The 1.0.5 app runs
+  the candidate's helper, which launches the new app through LaunchServices,
+  so the log must not show any `update relaunch:` line, and the surviving
+  process's `launch:` line must report `parent=1` and `responsible=` equal to
+  its own pid. The script also checks the process count, version, leftovers,
+  preferences, Application Support, runtime, and model cache; dictate once
+  into the app it leaves running to confirm audio capture without quitting and
+  reopening by hand. Optionally repeat with `v1.0.3`, whose own helper spawns the new app
+  as its child: the log must show `update relaunch: spawned as a child of
+  helper` followed by `update relaunch: new instance pid=`.
 - Check ordinary Spaces and another app's native full-screen Space, including
   switching Spaces during recording, on macOS 14 and a supported newer system.
   Pure lifecycle tests do not qualify real window visibility or focus behavior.
