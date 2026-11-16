@@ -128,6 +128,13 @@ class FinalizationTests(unittest.TestCase):
         self.assertEqual(self.final(server)["text"], "Use Codec.")
         self.assertEqual(server.session.calls, [{"context": "Codex"}])
 
+    def test_everyday_words_never_become_learned_hints(self):
+        server = self.make_server(["Use Codec."])
+        server.set_learned_context("the\na\nCodex\n它\nthe")
+        self.assertEqual(server.learned_context, "Codex")
+        self.preview(server, [])
+        self.assertEqual(server.session.calls, [{"context": "Codex"}])
+
     def test_unbiased_vocabulary_check_excludes_learned_hints(self):
         server = self.make_server(["Use Claude", "Use Cloud"], context="Claude")
         server.set_learned_context("Codex")
