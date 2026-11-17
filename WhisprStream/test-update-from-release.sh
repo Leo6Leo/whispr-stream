@@ -254,7 +254,9 @@ if [ ! -x "$PYTHON" ]; then
 fi
 
 other_instances() {
-    pgrep -x WhisprStream 2>/dev/null | while IFS= read -r pid; do
+    # pgrep exits 1 when nothing matches; under pipefail that would end the
+    # script silently in exactly the state the live run requires.
+    { pgrep -x WhisprStream 2>/dev/null || true; } | while IFS= read -r pid; do
         printf '%s %s\n' "$pid" "$(ps -p "$pid" -ww -o comm= 2>/dev/null)"
     done
 }
@@ -830,6 +832,17 @@ on run argv
                     end if
                 end try
             end repeat
+            -- macOS 27 exposes these SwiftUI buttons without a name. The
+            -- prompt has exactly two, "Not Now" then "Update & Relaunch".
+            try
+                if (name of theWindow as text) is "WhisprStream Update" then
+                    set promptButtons to buttons of group 1 of theWindow
+                    if (count of promptButtons) is 2 then
+                        click item 2 of promptButtons
+                        return "clicked Update & Relaunch (unnamed, second button of the prompt)"
+                    end if
+                end if
+            end try
         end repeat
         if wantMenu then
             try
@@ -1130,6 +1143,15 @@ volatile_prefixes = ("NSStatusItem ", "NSWindow Frame ", "NSSplitView Subview Fr
 merged_lists = {"vocabularyEntries", "contextTerms"}
 merged_json = {"voiceShortcuts.v1"}
 problems = []
+def decoded(value):
+    # The app stores some settings as JSON written without sorted keys, so
+    # a re-save changes the bytes but not the setting.
+    if isinstance(value, bytes):
+        try:
+            return json.loads(value)
+        except (ValueError, TypeError):
+            pass
+    return value
 for key, value in sorted(before.items()):
     if key == prompted_key or key.startswith(volatile_prefixes):
         continue
@@ -1147,7 +1169,7 @@ for key, value in sorted(before.items()):
             lost = ["(undecodable)"]
         if lost:
             problems.append(f"{key} lost {len(lost)} entries")
-    elif after[key] != value:
+    elif after[key] != value and decoded(after[key]) != decoded(value):
         problems.append(f"{key} changed")
 if after.get(canary_key) != canary:
     problems.append(f"the canary {canary_key} did not survive")
