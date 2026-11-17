@@ -167,12 +167,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self, selector: #selector(rewarmSpeechEngine),
             name: NSWorkspace.didWakeNotification, object: nil
         )
+        // A locked screen or a session switched away cannot receive dictated
+        // text, so dictation is suspended there instead of keeping the
+        // microphone hot with nowhere for the transcript to go.
         workspaceCenter.addObserver(
-            self, selector: #selector(rewarmSpeechEngine),
+            self, selector: #selector(handleSessionLock),
+            name: NSWorkspace.sessionDidResignActiveNotification, object: nil
+        )
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(handleSessionLock),
+            name: Notification.Name("com.apple.screenIsLocked"), object: nil
+        )
+        workspaceCenter.addObserver(
+            self, selector: #selector(handleSessionUnlock),
             name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil
         )
         DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(rewarmSpeechEngine),
+            self, selector: #selector(handleSessionUnlock),
             name: Notification.Name("com.apple.screenIsUnlocked"), object: nil
         )
 
@@ -818,6 +829,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard state.phase == .idle, isASRReady, let asr else { return }
         Log.write("speech engine re-warm requested after wake or unlock")
         asr.warm()
+    }
+
+    /// Locked screen or switched-away session: the password field cannot
+    /// take dictated text, so end any active dictation and ignore the
+    /// trigger until the session returns.
+    @objc private func handleSessionLock() {
+        hotkey?.suspend()
+        Log.write("session locked; dictation suspended")
+    }
+
+    /// Back on an unlocked session: re-arm the trigger and warm the engine
+    /// that sat idle through the lock.
+    @objc private func handleSessionUnlock() {
+        // Re-apply the shortcut recorder's state wholesale, so a recorder
+        // left open keeps its suspension instead of racing the unlock.
+        hotkey?.setSuspendedForShortcutCapture(settings.isCapturingTriggerShortcut)
+        rewarmSpeechEngine()
     }
 
     // MARK: - Dictation lifecycle
