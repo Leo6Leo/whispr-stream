@@ -496,6 +496,19 @@ private struct ModelTab: View {
                 .animation(.spring(response: 0.3, dampingFraction: 0.85),
                            value: settings.isReloadingModel)
             }
+            Section {
+                Toggle(isOn: $settings.largeModelForFinalText) {
+                    HStack(spacing: 6) {
+                        Text("Use the 1.7B model for the final text")
+                        BetaBadge()
+                    }
+                }
+                .disabled(!canUseLargeModelForFinalText)
+            } footer: {
+                Text(largeModelForFinalTextHint)
+                    .foregroundStyle(.secondary)
+                    .font(.callout)
+            }
         }
         .formStyle(.grouped)
         .onReceive(NotificationCenter.default.publisher(
@@ -532,6 +545,20 @@ private struct ModelTab: View {
     private func installState(_ model: ASRModel) -> ModelInstallState {
         _ = reloadToken
         return ModelCatalog.state(for: model)
+    }
+
+    private var canUseLargeModelForFinalText: Bool {
+        settings.model == .small && installState(.large).isInstalled
+    }
+
+    private var largeModelForFinalTextHint: String {
+        if settings.model != .small {
+            return "Available while Qwen3-ASR 0.6B is the selected model."
+        }
+        if !installState(.large).isInstalled {
+            return "Download Qwen3-ASR 1.7B above to use this."
+        }
+        return "Beta. Live text stays on the fast 0.6B model; when you finish speaking, the 1.7B model writes the final text. More accurate, but the text lands a little later, may differ from the preview, and both models stay in memory (about 5 GB more). Word-choice questions are not asked in this mode."
     }
 }
 

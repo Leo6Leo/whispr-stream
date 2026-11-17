@@ -705,3 +705,329 @@ class FirstPreviewTests(FinalizationTests):
         # without decoding until the harness ends it.
         self.assertEqual(server.session.lengths, [samples(0.5)])
         self.assertEqual(events[-1]["committed"] + events[-1]["tail"], "Hi")
+
+
+class FinalModelTests(unittest.TestCase):
+    """Previews on the fast model, the final text from a second model."""
+
+    def make_server(self, preview_outputs, final_outputs, *, context="",
+                    final_model="large", fail_final_load=False, seconds=5.0,
+                    model="small", language="Chinese"):
+        def fake_session(outputs):
+            calls = []
+            responses = iter(outputs)
+
+            def transcribe(audio, **kwargs):
+                calls.append(kwargs)
+                return SimpleNamespace(text=next(responses), language=language)
+
+            return SimpleNamespace(transcribe=transcribe, calls=calls)
+
+        preview_session = fake_session(preview_outputs)
+        final_session = fake_session(final_outputs)
+        loaded = []
+
+        def build_session(model_id, bits, *, engine="qwen3", warm=True):
+            loaded.append(model_id)
+            if model_id in ("large", "Qwen/Qwen3-ASR-1.7B") and model_id != model:
+                if fail_final_load:
+                    raise RuntimeError("weights missing")
+                return final_session, 0
+            return preview_session, 0
+
+        with patch.object(asr_engine, "build_session", side_effect=build_session), \
+             patch.object(asr_server, "emit") as emitted:
+            server = asr_server.Server(model, 8, context, final_model_id=final_model)
+        self.ready = [call.args[0] for call in emitted.call_args_list]
+        self.loaded = loaded
+        self.preview_session, self.final_session = preview_session, final_session
+        server.buf = voice(seconds)
+        server.active = True
+        return server
+
+    preview = FinalizationTests.preview
+    final = FinalizationTests.final
+
+    def test_final_text_comes_from_the_final_model_even_with_an_exact_preview(self):
+        server = self.make_server(["我明日了。"], ["我 merge 了。"])
+        self.preview(server, [])
+        final = self.final(server)
+        self.assertEqual(final["text"], "我 merge 了。")
+        self.assertEqual(final["mode"], "fresh-final-final-model")
+        self.assertEqual(len(self.preview_session.calls), 1)
+        self.assertEqual(len(self.final_session.calls), 1)
+
+    def test_disagreement_with_the_preview_never_asks_a_question(self):
+        server = self.make_server(["Use Codex."] * 3, ["Use Codec."])
+        self.preview(server, [voice(0.2)] * 2)
+        final = self.final(server)
+        self.assertEqual(final["text"], "Use Codec.")
+        self.assertNotIn("review", final)
+        self.assertNotIn("reviews", final)
+
+    def test_vocabulary_check_runs_on_the_final_model(self):
+        server = self.make_server(["Use Claude"] * 2, ["Use Claude", "Use Cloud"], context="Claude")
+        self.preview(server, [])
+        before = len(self.preview_session.calls)
+        self.final(server)
+        self.assertEqual(len(self.preview_session.calls), before)
+        self.assertEqual(self.final_session.calls, [{"context": "Claude", "language": "Chinese"}, {}])
+
+    def test_same_or_empty_final_model_loads_one_session(self):
+        for final_model in ("", "small"):
+            with self.subTest(final_model=final_model):
+                server = self.make_server(["你好。"], [], final_model=final_model)
+                self.assertIsNone(server.final_session)
+                self.assertEqual(self.loaded, ["small"])
+                self.preview(server, [])
+                self.assertEqual(self.final(server)["mode"], "reuse-exact")
+
+    def test_final_model_that_cannot_load_falls_back_to_the_preview_model(self):
+        server = self.make_server(["你好。"], [], fail_final_load=True)
+        self.assertIsNone(server.final_session)
+        self.assertEqual([event["type"] for event in self.ready], ["ready"])
+        self.preview(server, [])
+        self.assertEqual(self.final(server)["text"], "你好。")
+
+    def test_idle_final_model_is_woken_once_while_speaking(self):
+        server = self.make_server(["你好。"] * 3, ["", "你好啊。"])
+        server._final_session_used_at = time.perf_counter() - 60
+        self.preview(server, [voice(0.2)] * 2)
+        self.assertEqual(self.final_session.calls, [{}])
+        self.assertEqual(self.final(server)["text"], "你好啊。")
+
+    def test_recently_used_final_model_is_not_woken(self):
+        server = self.make_server(["你好。"] * 2, ["你好啊。"])
+        self.preview(server, [voice(0.2)])
+        self.assertEqual(self.final_session.calls, [])
+
+    def test_final_model_is_woken_once_per_long_utterance(self):
+        # Previously every preview past FINAL_MODEL_IDLE_WAKE_SEC re-woke the
+        # model, stalling live text every 15 s of one long dictation.
+        server = self.make_server(["你好。"] * 5, ["", "你好啊。"])
+        with patch.object(asr_server, "FINAL_MODEL_IDLE_WAKE_SEC", 0.0):
+            self.preview(server, [voice(0.2)] * 4)
+            self.assertEqual(self.final_session.calls, [{}])
+            self.assertEqual(self.final(server)["text"], "你好啊。")
+
+    def test_long_utterance_rewakes_only_after_the_long_interval(self):
+        server = self.make_server(["你好。"] * 4, ["", ""])
+        server._final_session_used_at = time.perf_counter() - 60
+        remaining = iter([voice(0.2)] * 3)
+
+        class AgeFinalModel:
+            def wait(self, timeout):
+                addition = next(remaining, None)
+                if addition is None:
+                    return True
+                server.buf = np.concatenate((server.buf, addition))
+                # Pretend the model sat idle well past the 15 s threshold but
+                # short of the re-wake interval, then past that interval too.
+                idle = 16.0 if len(server.buf) < samples(5.5) else asr_server.FINAL_MODEL_REWAKE_SEC + 1
+                server._final_session_used_at = time.perf_counter() - idle
+                return False
+
+            def set(self):
+                pass
+
+        server._preview_stop = AgeFinalModel()
+        with patch.object(asr_server, "emit"):
+            server._loop()
+        # Woken after the first preview, not at 16 s idle, again past 60 s.
+        self.assertEqual(self.final_session.calls, [{}, {}])
+
+    def test_next_utterance_wakes_the_final_model_again(self):
+        server = self.make_server(["你好。"] * 4, ["", ""])
+        server._final_session_used_at = time.perf_counter() - 60
+        self.preview(server, [])
+        self.assertEqual(len(self.final_session.calls), 1)
+        server._preview_stop = asr_server.threading.Event()
+        with patch.object(asr_server.threading, "Thread"):
+            server.start()
+        server._thread = None
+        server.buf = voice(5.0)
+        server._final_session_used_at = time.perf_counter() - 60
+        self.preview(server, [])
+        self.assertEqual(len(self.final_session.calls), 2)
+
+    # -- stop() while the preview thread is still decoding ------------------
+
+    def run_preview_thread(self, server):
+        server._preview_stop = threading.Event()
+        server._thread = threading.Thread(target=server._loop, daemon=True)
+        server._thread.start()
+
+    def blocking(self, session, outputs, block_on_call):
+        """Make call number ``block_on_call`` wait until the test releases it."""
+        entered, release = threading.Event(), threading.Event()
+        responses = iter(outputs)
+
+        def transcribe(audio, **kwargs):
+            session.calls.append(kwargs)
+            if len(session.calls) == block_on_call:
+                entered.set()
+                release.wait(timeout=5)
+            return SimpleNamespace(text=next(responses), language="Chinese")
+
+        session.transcribe = transcribe
+        return entered, release
+
+    def test_stop_during_a_wake_waits_for_it_and_keeps_the_dictation(self):
+        server = self.make_server(["你好。"] * 3, [])
+        server._final_session_used_at = time.perf_counter() - 60
+        entered, release = self.blocking(self.final_session, ["", "你好啊。"], 1)
+        with patch.object(asr_server, "emit"):
+            self.run_preview_thread(server)
+            self.assertTrue(entered.wait(timeout=2))
+        threading.Timer(0.05, release.set).start()
+        final = self.final(server)
+        self.assertEqual(final["text"], "你好啊。")
+        self.assertIsNone(server._thread)
+        # The wake, then the final; no second preview or wake after release.
+        self.assertEqual(len(self.final_session.calls), 2)
+        self.assertEqual(len(self.preview_session.calls), 1)
+
+    def test_stop_during_a_preview_skips_the_wake(self):
+        server = self.make_server([], ["你好啊。"])
+        server._final_session_used_at = time.perf_counter() - 60
+        entered, release = self.blocking(self.preview_session, ["你好。"] * 2, 1)
+        with patch.object(asr_server, "emit"):
+            self.run_preview_thread(server)
+            self.assertTrue(entered.wait(timeout=2))
+        threading.Timer(0.05, release.set).start()
+        self.assertEqual(self.final(server)["text"], "你好啊。")
+        # Only the final ran on the large model: the final pages it in itself.
+        self.assertEqual(len(self.final_session.calls), 1)
+
+    def test_large_final_model_never_sees_the_vocabulary_prompt(self):
+        server = self.make_server(
+            ["不要 post 任何东西。"], ["不要 post 任何东西，用 Cloud。"],
+            context="Claude", final_model="Qwen/Qwen3-ASR-1.7B",
+        )
+        server.set_learned_context("Codex")
+        self.preview(server, [])
+        final = self.final(server)
+        # One unprompted decode; the vocabulary spelling is restored after it.
+        self.assertEqual(self.final_session.calls, [{"language": "Chinese"}])
+        self.assertEqual(final["text"], "不要 post 任何东西，用 Claude。")
+        self.assertEqual(final["mode"], "fresh-final-final-model-context-variant-canonicalized")
+        self.assertEqual(self.preview_session.calls[0], {"context": "Claude\nCodex"})
+
+    def test_large_model_on_its_own_is_also_unprompted(self):
+        server = self.make_server(
+            ["用 Cloud。", "用 Cloud。"], [], context="Claude",
+            final_model="", model="Qwen/Qwen3-ASR-1.7B",
+        )
+        events = self.preview(server, [])
+        self.assertEqual(self.preview_session.calls, [{}])
+        self.assertEqual(events[-1]["committed"] + events[-1]["tail"], "用 Claude。")
+
+    def test_other_final_models_keep_the_vocabulary_prompt(self):
+        server = self.make_server(["Use Codec."], ["Use Codec."], context="Sharada")
+        self.preview(server, [])
+        self.final(server)
+        self.assertEqual(self.final_session.calls, [{"context": "Sharada", "language": "Chinese"}])
+
+    def test_final_model_takes_its_language_from_the_fast_model(self):
+        server = self.make_server(["不要 post 任何东西。"], ["不要 post 任何东西。"])
+        self.preview(server, [])
+        self.final(server)
+        self.assertEqual(self.final_session.calls, [{"language": "Chinese"}])
+
+    def test_translated_final_is_replaced_by_the_fast_models_final(self):
+        server = self.make_server(
+            ["不要 post 任何东西。", "不要 post 任何东西。"], ["Don't post any things."]
+        )
+        self.preview(server, [])
+        final = self.final(server)
+        self.assertEqual(final["text"], "不要 post 任何东西。")
+        self.assertEqual(final["mode"], "fresh-final-final-model-rejected")
+        self.assertNotIn("reviews", final)
+
+    def test_english_speech_written_in_chinese_is_replaced_too(self):
+        server = self.make_server(
+            ["When would you be free?"] * 2, ["你什么时候有空？"], language="English"
+        )
+        self.preview(server, [])
+        self.assertEqual(self.final(server)["text"], "When would you be free?")
+
+    def test_mixed_speech_is_not_mistaken_for_translation(self):
+        cases = [
+            ("那你 spin up 一个 sub agent 的 ops 来修复一下吧。", "那你 spin up 一个 sub agent 的 opus 来修复一下吧。"),
+            ("十三。When would you be free?", "Sure thing. When would you be free?"),
+            ("我明日了。", "我 merge 了。"),
+            ("", "Don't post any things."),
+        ]
+        for preview, final in cases:
+            with self.subTest(final=final):
+                self.assertFalse(asr_server.final_translated_the_speech(preview, final))
+        self.assertTrue(asr_server.final_translated_the_speech(
+            "这个太麻烦了。我想先确定这个能不能 work", "This is too much. I want to first confirm if this can work."
+        ))
+
+
+class StopWaitTests(unittest.TestCase):
+    """stop() waits out a slow preview thread instead of dropping the text."""
+
+    def make_server(self, outputs):
+        session = SimpleNamespace(
+            transcribe=lambda audio, **kw: SimpleNamespace(text=next(outputs), language="Chinese")
+        )
+        with patch.object(asr_engine, "build_session", return_value=(session, 0)), \
+             patch.object(asr_server, "emit"):
+            server = asr_server.Server("test", 8, "")
+        server.buf = voice(3.0)
+        server.active = True
+        return server
+
+    def scripted_thread(self, server, clock, decodes, ends_at):
+        """A preview thread on a fake clock: decode boundaries, then exit."""
+
+        class Thread:
+            def join(self, timeout=None):
+                clock[0] += timeout
+                for boundary in decodes:
+                    if boundary <= clock[0]:
+                        server._decode_progress_at = boundary
+
+            def is_alive(self):
+                return ends_at is None or clock[0] < ends_at
+
+        return Thread()
+
+    def stop(self, server, thread, clock):
+        server._thread = thread
+        with patch.object(asr_server.time, "perf_counter", lambda: clock[0]), \
+             patch.object(asr_server, "emit") as emitted:
+            server.stop()
+        return [call.args[0] for call in emitted.call_args_list]
+
+    def test_slow_but_progressing_decodes_are_waited_out(self):
+        # A 3.1 s cold wake, then a 4 s preview decode: 7.1 s in all, past the
+        # old fixed 5 s join that threw the dictation away.
+        clock = [100.0]
+        server = self.make_server(iter(["你好。"]))
+        thread = self.scripted_thread(server, clock, [100.0, 103.1, 103.1, 107.1], 107.1)
+        events = self.stop(server, thread, clock)
+        self.assertEqual([event["type"] for event in events], ["final"])
+        self.assertEqual(events[0]["text"], "你好。")
+        self.assertIsNone(server._thread)
+
+    def test_a_hung_decode_still_gives_up_and_keeps_the_thread(self):
+        clock = [100.0]
+        server = self.make_server(iter([]))
+        thread = self.scripted_thread(server, clock, [100.0], None)
+        events = self.stop(server, thread, clock)
+        self.assertEqual(events, [{"type": "error", "message": "final: preview decode did not stop"}])
+        self.assertAlmostEqual(clock[0] - 100.0, asr_server.PREVIEW_DECODE_STALL_SEC, delta=0.1)
+        # start() can still wait for it before the next dictation.
+        self.assertIs(server._thread, thread)
+
+    def test_endless_progress_is_still_bounded(self):
+        clock = [100.0]
+        server = self.make_server(iter([]))
+        boundaries = [100.0 + 0.5 * step for step in range(1000)]
+        thread = self.scripted_thread(server, clock, boundaries, None)
+        events = self.stop(server, thread, clock)
+        self.assertEqual(events[0]["type"], "error")
+        self.assertAlmostEqual(clock[0] - 100.0, asr_server.STOP_PREVIEW_WAIT_MAX_SEC, delta=0.1)

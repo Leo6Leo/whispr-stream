@@ -457,6 +457,31 @@ final class Settings: ObservableObject {
         }
     }
 
+    /// Keep live previews on the fast 0.6B model and decode the final text
+    /// once with the 1.7B model. Applies only while the 0.6B model is
+    /// selected and the 1.7B weights are installed; like the model itself it
+    /// is a sidecar startup option, so changing it restarts the sidecar.
+    @Published var largeModelForFinalText: Bool {
+        didSet {
+            guard largeModelForFinalText != oldValue else { return }
+            defaults.set(largeModelForFinalText, forKey: Keys.largeModelForFinalText)
+            onModelChange?(model)
+        }
+    }
+
+    /// The model for the final decode, or nil when one model does everything.
+    var finalTextModel: ASRModel? {
+        Self.finalTextModel(
+            enabled: largeModelForFinalText,
+            selected: model,
+            largeInstalled: ModelCatalog.state(for: .large).isInstalled
+        )
+    }
+
+    nonisolated static func finalTextModel(enabled: Bool, selected: ASRModel, largeInstalled: Bool) -> ASRModel? {
+        enabled && selected == .small && largeInstalled ? .large : nil
+    }
+
     @Published var hasCompletedOnboarding: Bool {
         didSet { defaults.set(hasCompletedOnboarding, forKey: Keys.onboarded) }
     }
@@ -524,6 +549,7 @@ final class Settings: ObservableObject {
         static let voiceShortcuts = "voiceShortcuts.v1"
         static let model = "model"
         static let selectedModel = "selectedModel.v2"
+        static let largeModelForFinalText = "largeModelForFinalText.v1"
         static let customModels = "customModels.v1"
         static let onboarded = "hasCompletedOnboarding"
         static let firstDictationCoachPending = "needsFirstDictationCoach"
@@ -557,6 +583,7 @@ final class Settings: ObservableObject {
         copyToClipboard = defaults.object(forKey: Keys.copyToClipboard) as? Bool ?? true
         reviewUncertainWords = defaults.bool(forKey: Keys.reviewUncertainWords)
         learnFromCorrections = defaults.bool(forKey: Keys.learnFromCorrections)
+        largeModelForFinalText = defaults.bool(forKey: Keys.largeModelForFinalText)
         captureCorrections = defaults.bool(forKey: Keys.captureCorrections)
         usePunctuation = defaults.object(forKey: Keys.usePunctuation) as? Bool ?? true
         removeFillerWords = defaults.object(forKey: Keys.removeFillerWords) as? Bool ?? true

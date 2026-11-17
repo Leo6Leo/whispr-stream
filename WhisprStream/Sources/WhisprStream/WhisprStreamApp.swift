@@ -73,8 +73,6 @@ private final class StatusUpdateDotView: NSView {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private static let speechEngineStartupTimeout: TimeInterval = 20
-
     private let state = AppState()
     private lazy var settings = Settings.shared
     private let windows = AppWindows()
@@ -558,21 +556,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         speechEngineStartedAt = ProcessInfo.processInfo.systemUptime
         try service.start()
         asr = service
-        armSpeechEngineStartupTimeout(generation: generation)
+        armSpeechEngineStartupTimeout(generation: generation, timeout: service.startupTimeout)
     }
 
-    private func armSpeechEngineStartupTimeout(generation: Int) {
+    /// `timeout` comes from the launched service, so it reflects the models
+    /// the sidecar was really given, developer overrides included.
+    private func armSpeechEngineStartupTimeout(generation: Int, timeout: TimeInterval) {
         speechEngineStartupWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self,
                   self.speechEngineGeneration == generation,
                   !self.isASRReady else { return }
-            Log.write("speech engine startup timed out after \(Int(Self.speechEngineStartupTimeout))s")
+            Log.write("speech engine startup timed out after \(Int(timeout))s")
             self.failSpeechEngine("Speech engine took too long to start")
         }
         speechEngineStartupWork = work
         DispatchQueue.main.asyncAfter(
-            deadline: .now() + Self.speechEngineStartupTimeout,
+            deadline: .now() + timeout,
             execute: work
         )
     }
@@ -612,7 +612,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             bits: bits,
             context: settings.asrContext,
             shortUtteranceLanguage: settings.shortUtteranceLanguage,
-            learnedContext: learnedContext
+            learnedContext: learnedContext,
+            finalModel: engine == .qwen3 && model == ASRModel.small.rawValue
+                ? settings.finalTextModel?.rawValue
+                : nil
         )
     }
 
