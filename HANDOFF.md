@@ -252,10 +252,13 @@ Verified after rendering: every note lands within 0.3 % of its intended pitch
 buries the 0.05 s grace notes), and nothing clips (loudest peak 0.339).
 
 Selecting a **pair** gives a sound at dictation start and its answer on insert.
-The original **macOS alert sounds are all still there** and still behave exactly
-as before — one sound on insert, nothing on start. `SoundTheme` stores
-`pair:<case>` or `system:<name>`; a bare unprefixed value is a pre-pairs setting
-and migrates to `.system`.
+**System Default** plays the cues macOS's own dictation uses — `dt-begin` on
+start, `dt-confirm` on insert — resolved at runtime from
+`/System/Library/PrivateFrameworks/AssistantServices.framework`, so nothing of
+Apple's is bundled. The original **macOS alert sounds are all still there** and
+still behave exactly as before — one sound on insert, nothing on start.
+`SoundTheme` stores `pair:<case>`, `system-default`, or `system:<name>`; a bare
+unprefixed value is a pre-pairs setting and migrates to `.system`.
 
 Note the pairs are not loudness-matched to each other — the clicks peak around
 0.07–0.15 and the melodic pairs around 0.28–0.34, as designed.

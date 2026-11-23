@@ -100,15 +100,26 @@ enum SoundPair: String, CaseIterable, Identifiable {
 /// What the app plays around a dictation.
 ///
 /// `system` is the original behaviour and is deliberately kept: a single macOS
-/// alert sound on insert, nothing on start. Only the designed pairs have a start
-/// half, so selecting one is what turns the start sound on.
+/// alert sound on insert, nothing on start. `systemDefault` is the pair macOS's
+/// own dictation uses, read from a private system framework rather than
+/// bundled. Only pairs and the system default have a start half, so selecting
+/// one is what turns the start sound on.
 enum SoundTheme: Hashable {
     case pair(SoundPair)
+    case systemDefault
     case system(String)
+
+    /// File stems of macOS's own dictation cues inside
+    /// AssistantServices.framework, plus the start cue's ring time, used to
+    /// space the two halves when auditioning.
+    static let systemDefaultStartFile = "dt-begin"
+    static let systemDefaultFinishFile = "dt-confirm"
+    static let systemDefaultStartDuration: TimeInterval = 0.32
 
     var storageValue: String {
         switch self {
         case let .pair(p): return "pair:\(p.rawValue)"
+        case .systemDefault: return "system-default"
         case let .system(name): return "system:\(name)"
         }
     }
@@ -121,6 +132,8 @@ enum SoundTheme: Hashable {
         if let name = raw.stripping("pair:") {
             guard let pair = SoundPair(rawValue: name) else { return nil }
             self = .pair(pair)
+        } else if raw == SoundTheme.systemDefault.storageValue {
+            self = .systemDefault
         } else if let name = raw.stripping("system:") {
             self = .system(name)
         } else if !raw.isEmpty {
@@ -133,6 +146,7 @@ enum SoundTheme: Hashable {
     var label: String {
         switch self {
         case let .pair(p): return p.label
+        case .systemDefault: return "System Default"
         case let .system(name): return name
         }
     }
