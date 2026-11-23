@@ -1,7 +1,8 @@
 import AVFoundation
 import Foundation
 
-/// Plays macOS's built-in alert sounds and the app's own sounds.
+/// Plays macOS's built-in alert sounds, the app's own sounds, and the
+/// dictation cues from macOS's private AssistantServices framework.
 ///
 /// Each file gets one cached, pre-buffered `AVAudioPlayer`, so a cue starts
 /// without disk or decoder latency.
@@ -58,10 +59,26 @@ final class SoundPlayer {
     /// sound, so the two namespaces can share one cache without colliding.
     private static let bundledPrefix = "bundled:"
 
+    /// Marks an id as one of macOS's own dictation cues, which live inside a
+    /// private system framework rather than the app bundle or the alert
+    /// folders. A third namespace for the same reason.
+    private static let dictationPrefix = "dt:"
+
+    /// Where macOS keeps its dictation cues (dt-begin, dt-confirm, …).
+    private static let assistantServicesResources =
+        "/System/Library/PrivateFrameworks/AssistantServices.framework/Versions/A/Resources"
+
     static func bundledID(_ file: String) -> String { bundledPrefix + file }
 
-    /// Resolves either namespace to a file on disk.
+    static func dictationID(_ file: String) -> String { dictationPrefix + file }
+
+    /// Resolves each namespace to a file on disk.
     private static func resolve(_ id: String) -> URL? {
+        if id.hasPrefix(dictationPrefix) {
+            let path = (assistantServicesResources as NSString)
+                .appendingPathComponent("\(String(id.dropFirst(dictationPrefix.count))).caf")
+            return FileManager.default.fileExists(atPath: path) ? URL(fileURLWithPath: path) : nil
+        }
         guard id.hasPrefix(bundledPrefix) else { return url(for: id) }
         let file = String(id.dropFirst(bundledPrefix.count))
         return Bundle.main.url(forResource: file, withExtension: "caf", subdirectory: "Sounds")
@@ -97,4 +114,9 @@ final class SoundPlayer {
     func playBundled(_ file: String) { play(Self.bundledID(file)) }
 
     func prepareBundled(_ file: String) { prepare(Self.bundledID(file)) }
+
+    /// Plays one of macOS's own dictation cues, e.g. "dt-begin".
+    func playDictation(_ file: String) { play(Self.dictationID(file)) }
+
+    func prepareDictation(_ file: String) { prepare(Self.dictationID(file)) }
 }

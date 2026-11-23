@@ -792,9 +792,10 @@ private struct AddCustomModelView: View {
 private struct SoundTab: View {
     @ObservedObject var settings: Settings
 
-    private var isPair: Bool {
-        if case .pair = settings.soundTheme { return true }
-        return false
+    /// Whether the theme has a cue for dictation start, not just insert.
+    private var hasStartCue: Bool {
+        if case .system = settings.soundTheme { return false }
+        return true
     }
 
     var body: some View {
@@ -802,12 +803,15 @@ private struct SoundTab: View {
             Section {
                 Toggle(isOn: $settings.playSound) {
                     Text("Play a sound")
-                    Text(isPair
+                    Text(hasStartCue
                          ? "One sound when dictation starts, its answer when the text lands."
                          : "A single sound when the text lands.")
                 }
 
                 Picker("Sound", selection: $settings.soundTheme) {
+                    Section("System") {
+                        Text("System Default").tag(SoundTheme.systemDefault)
+                    }
                     ForEach(SoundPair.groups, id: \.0) { name, pairs in
                         Section(name) {
                             ForEach(pairs) { pair in
@@ -827,7 +831,7 @@ private struct SoundTab: View {
                     Button {
                         settings.previewSound()
                     } label: {
-                        Label(isPair ? "Play both" : "Play", systemImage: "play.fill")
+                        Label(hasStartCue ? "Play both" : "Play", systemImage: "play.fill")
                     }
                     .disabled(!settings.playSound)
                 }
@@ -835,9 +839,12 @@ private struct SoundTab: View {
                 Text("Sound")
             } footer: {
                 Group {
-                    if case let .pair(pair) = settings.soundTheme {
+                    switch settings.soundTheme {
+                    case let .pair(pair):
                         Text(pair.detail)
-                    } else {
+                    case .systemDefault:
+                        Text("The cues macOS's built-in dictation uses — the start chime when it begins listening, the confirm tone when text lands. Read from AssistantServices.framework on disk, so nothing is bundled.")
+                    case .system:
                         Text("These are macOS's own alert sounds, from /System/Library/Sounds. Drop an .aiff or .wav into ~/Library/Sounds and it appears here too. They play on insert only — pick a pair above to also get a sound when dictation starts.")
                     }
                 }

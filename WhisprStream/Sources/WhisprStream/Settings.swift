@@ -271,8 +271,8 @@ final class Settings: ObservableObject {
         }
     }
 
-    /// Which sound plays around a dictation — a designed pair, or one of
-    /// macOS's own alert sounds as before.
+    /// Which sound plays around a dictation — a designed pair, macOS's own
+    /// dictation pair, or one of macOS's alert sounds as before.
     @Published var soundTheme: SoundTheme {
         didSet {
             defaults.set(soundTheme.storageValue, forKey: Keys.soundTheme)
@@ -289,6 +289,9 @@ final class Settings: ObservableObject {
         case let .pair(pair):
             SoundPlayer.shared.prepareBundled(pair.startFile)
             SoundPlayer.shared.prepareBundled(pair.finishFile)
+        case .systemDefault:
+            SoundPlayer.shared.prepareDictation(SoundTheme.systemDefaultStartFile)
+            SoundPlayer.shared.prepareDictation(SoundTheme.systemDefaultFinishFile)
         case let .system(name):
             SoundPlayer.shared.prepare(name)
         }
@@ -296,11 +299,16 @@ final class Settings: ObservableObject {
 
     /// Called when dictation begins.
     ///
-    /// Only pairs have a start half. A macOS alert sound stays finish-only, which
-    /// is exactly how the app behaved before pairs existed.
+    /// Only pairs and the system default have a start half. A macOS alert sound
+    /// stays finish-only, which is exactly how the app behaved before pairs
+    /// existed.
     func playStart() {
-        guard playSound, case let .pair(pair) = soundTheme else { return }
-        SoundPlayer.shared.playBundled(pair.startFile)
+        guard playSound else { return }
+        switch soundTheme {
+        case let .pair(pair): SoundPlayer.shared.playBundled(pair.startFile)
+        case .systemDefault: SoundPlayer.shared.playDictation(SoundTheme.systemDefaultStartFile)
+        case .system: break
+        }
     }
 
     /// Called when a transcript is inserted.
@@ -312,6 +320,7 @@ final class Settings: ObservableObject {
     private func playFinishSound() {
         switch soundTheme {
         case let .pair(pair): SoundPlayer.shared.playBundled(pair.finishFile)
+        case .systemDefault: SoundPlayer.shared.playDictation(SoundTheme.systemDefaultFinishFile)
         case let .system(name): SoundPlayer.shared.play(name)
         }
     }
@@ -321,13 +330,20 @@ final class Settings: ObservableObject {
     /// Ignores the enable toggle — the user pressed the button, so they want to
     /// hear it.
     func previewSound() {
-        guard case let .pair(pair) = soundTheme else {
+        switch soundTheme {
+        case let .pair(pair):
+            SoundPlayer.shared.playBundled(pair.startFile)
+            scheduleFinish(after: pair.startDuration)
+        case .systemDefault:
+            SoundPlayer.shared.playDictation(SoundTheme.systemDefaultStartFile)
+            scheduleFinish(after: SoundTheme.systemDefaultStartDuration)
+        case .system:
             playFinishSound()
-            return
         }
-        SoundPlayer.shared.playBundled(pair.startFile)
-        let gap = pair.startDuration + 0.28
-        DispatchQueue.main.asyncAfter(deadline: .now() + gap) { [weak self] in
+    }
+
+    private func scheduleFinish(after ring: TimeInterval) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + ring + 0.28) { [weak self] in
             self?.playFinishSound()
         }
     }
