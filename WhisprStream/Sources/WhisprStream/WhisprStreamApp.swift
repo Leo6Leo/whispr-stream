@@ -267,6 +267,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         syncLaunchAtLoginFromSystem()
     }
 
+    // Launching the app while it is already running opens Settings instead
+    // of doing nothing.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        windows.showSettings(settings, runtime: runtime, updates: updates)
+        return false
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         NotificationCenter.default.removeObserver(self, name: .whisprDeveloperTestModeActivated, object: nil)
         initialUpdateCheckWork?.cancel()
